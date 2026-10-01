@@ -1,12 +1,6 @@
 .miniconda/
 .cache/
 .vscode/
-AGENTS.md
-AGENT.md
-agents.md
-agent.md
-CLAUDE.md
-GEMINI.md
 /docs/*
 !/docs/competition-research.md
 !/docs/official-templates/
