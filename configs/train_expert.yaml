@@ -1,0 +1,32 @@
+# Local PARTIAL action expert BC: final 2 of 36 layers + norm/projections.
+# Set expert_last_n_layers: -1 for FULL action expert on a sufficiently large server GPU.
+# Full expert FP32 AdamW has a much larger memory requirement than this local preset.
+mode: expert
+expert_last_n_layers: 2
+base_checkpoint: models/lingbot-vla-v2-6b
+qwen_path: models/Qwen3-VL-4B-Instruct
+architecture_yaml: vendor/lingbot-vla-v2/configs/vla/robotwin/robotwin.yaml
+manifest: data/clean_manifest.json
+norm_stats: data/clean_norm_stats.json
+output_dir: runs/expert_partial_clean
+device: cuda
+train_projections: true
+batch_size: 1
+gradient_accumulation: 16
+gradient_checkpointing: true
+chunk_size: 50
+img_size: 256
+image_augment: false
+num_workers: 0
+val_episodes: 5
+seed: 42
+lr: 0.00005
+weight_decay: 0.01
+max_grad_norm: 1.0
+warmup_steps: 100
+max_steps: 1000
+eval_every: 100
+eval_batches: 8
+save_every: 100
+export: true
+export_dtype: bfloat16
