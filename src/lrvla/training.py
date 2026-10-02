@@ -16,7 +16,7 @@ import yaml
 
 from .training_checkpoint import export_hf_checkpoint, resume_training_checkpoint, save_training_checkpoint
 from .training_data import build_clean_datasets, epoch_dataloader, model_collate
-from .training_models import configure_trainable, flow_matching_bc, memory_report
+from .training_models import configure_trainable, flow_matching_bc, memory_report, normalize_bc_gradients
 from .training_identity import base_checkpoint_identity, manifest_content_sha256
 from .training_runtime import add_vendor_path, build_policy, enable_action_checkpointing
 
@@ -42,7 +42,7 @@ def schedule_multiplier(step, max_steps, warmup, minimum=0.1):
 
 def validate(model, loader, device, max_batches=8, loss_fn=flow_matching_bc):
     model.eval()
-    losses = []
+    numerator, valid_count = 0.0, 0.0
     gpu_ids = [torch.device(device).index or 0] if str(device).startswith("cuda") else []
     with torch.random.fork_rng(devices=gpu_ids), torch.no_grad():
         torch.manual_seed(12345)
@@ -52,9 +52,11 @@ def validate(model, loader, device, max_batches=8, loss_fn=flow_matching_bc):
             with torch.autocast(device_type=torch.device(device).type, dtype=torch.bfloat16,
                                 enabled=torch.device(device).type == "cuda"):
                 loss = loss_fn(model, move_batch(batch, device))
-            losses.append(float(loss))
+            count = float(batch["joint_mask"].float().sum())
+            numerator += float(loss) * count
+            valid_count += count
     model.train()
-    return sum(losses) / len(losses) if losses else None
+    return numerator / valid_count if valid_count else None
 
 
 def prepare_runtime_files(config, architecture, manifest_path, norm_path, output):
@@ -112,6 +114,9 @@ def portable_inference_cli(cli):
 
 
 def train(config, *, dry_run=False):
+    action_chunk_tail = config.get("action_chunk_tail", "mask")
+    if action_chunk_tail not in {"mask", "drop"}:
+        raise ValueError("action_chunk_tail must be 'mask' or 'drop'.")
     for key, default in (("batch_size", 1), ("gradient_accumulation", 16), ("max_steps", 1000),
                          ("save_every", 100), ("eval_every", 100)):
         if int(config.get(key, default)) <= 0:
@@ -159,7 +164,11 @@ def train(config, *, dry_run=False):
     from transformers import AutoProcessor
     processor = AutoProcessor.from_pretrained(qwen, padding_side="right", local_files_only=True)
     datasets, validation, splits = build_clean_datasets(manifest, data_config, policy.config, processor,
-                                                       robot_config, int(config.get("val_episodes", 5)))
+                                                       robot_config, int(config.get("val_episodes", 5)),
+                                                       action_chunk_tail=action_chunk_tail)
+    print(json.dumps({"training_samples": len(datasets),
+                      "validation_samples": len(validation) if validation is not None else 0,
+                      "action_chunk_tail": action_chunk_tail}, ensure_ascii=False), flush=True)
     if config.get("gradient_checkpointing", True):
         enable_action_checkpointing(policy)
     train_values = {**architecture["train"], **policy.config.to_dict()}
@@ -180,6 +189,11 @@ def train(config, *, dry_run=False):
                 "manifest_sha256": manifest_digest, "manifest_content_sha256": manifest_content_sha256(manifest),
                 "selection": selection,
                 "training_method": "clean_only_behavior_cloning", "competition_all_50_tasks": bool(manifest.get("complete_50_tasks")),
+                "loss_normalization": "valid_action_coordinate_mean_v1",
+                "data_sampling": {"action_chunk_tail": action_chunk_tail, "validation_action_chunk_tail": "mask",
+                                  "val_episodes": int(config.get("val_episodes", 5)),
+                                  "seed": int(config.get("seed", 42)), "batch_size": int(config.get("batch_size", 1)),
+                                  "gradient_accumulation": int(config.get("gradient_accumulation", 16))},
                 "memory": report, "norm_sha256": hashlib.sha256(norm_path.read_bytes()).hexdigest(),
                 "qwen_config_sha256": hashlib.sha256((qwen / "config.json").read_bytes()).hexdigest(),
                 "model_geometry": {"chunk_size": policy.config.chunk_size, "max_action_dim": policy.config.max_action_dim,
@@ -211,7 +225,8 @@ def train(config, *, dry_run=False):
     optimizer.zero_grad(set_to_none=True)
     metrics_path = output / "metrics.jsonl"
     while state["global_step"] < max_steps:
-        start, losses = time.monotonic(), []
+        start = time.monotonic()
+        loss_numerator, valid_count = 0.0, 0.0
         for _ in range(accumulation):
             try:
                 batch = next(batches)
@@ -222,11 +237,13 @@ def train(config, *, dry_run=False):
                 batch = next(batches)
             state["batch_offset"] += 1
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                loss = flow_matching_bc(policy, move_batch(batch, device))
+                loss = flow_matching_bc(policy, move_batch(batch, device), reduction="sum")
             if not torch.isfinite(loss):
                 raise FloatingPointError(f"Nonfinite BC loss at step {state['global_step']}")
-            (loss / accumulation).backward()
-            losses.append(float(loss.detach()))
+            loss.backward()
+            loss_numerator += float(loss.detach())
+            valid_count += float(batch["joint_mask"].float().sum())
+        normalize_bc_gradients(params, valid_count)
         grad = torch.nn.utils.clip_grad_norm_(params, float(config.get("max_grad_norm", 1)))
         if not torch.isfinite(grad):
             raise FloatingPointError("Nonfinite gradient norm; optimizer step aborted.")
@@ -235,7 +252,8 @@ def train(config, *, dry_run=False):
         optimizer.zero_grad(set_to_none=True)
         state["global_step"] += 1
         step = state["global_step"]
-        record = {"step": step, "loss": sum(losses) / len(losses), "grad_norm": float(grad),
+        record = {"step": step, "loss": loss_numerator / valid_count, "grad_norm": float(grad),
+                  "valid_action_coordinates": valid_count,
                   "lr": optimizer.param_groups[0]["lr"], "step_seconds": time.monotonic() - start,
                   "peak_gpu_gib": torch.cuda.max_memory_allocated(torch.device(device)) / 2**30}
         if validation_loader and step % int(config.get("eval_every", 100)) == 0:

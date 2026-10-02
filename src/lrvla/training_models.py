@@ -143,7 +143,7 @@ def fused_storage_torch_forward(self, module, num_experts, routing_weights, sele
     return out
 
 
-def masked_bc_loss(prediction, target, joint_mask, loss_type="L1_fm"):
+def masked_bc_loss(prediction, target, joint_mask, loss_type="L1_fm", *, reduction="mean"):
     if prediction.shape != target.shape or joint_mask.shape != target.shape:
         raise ValueError("Prediction, target and joint_mask must have identical [B,T,D] shapes.")
     mask = joint_mask.to(torch.float32)
@@ -156,10 +156,29 @@ def masked_bc_loss(prediction, target, joint_mask, loss_type="L1_fm"):
         loss = (prediction.float() - target.float()).square()
     else:
         raise ValueError(f"Unsupported BC flow-matching loss: {loss_type}")
-    return (loss * mask).sum() / count
+    numerator = (loss * mask).sum()
+    if reduction == "sum":
+        return numerator
+    if reduction == "mean":
+        return numerator / count
+    raise ValueError(f"Unsupported BC loss reduction: {reduction}")
 
 
-def flow_matching_bc(model, batch):
+@torch.no_grad()
+def normalize_bc_gradients(parameters, valid_count):
+    """Normalize summed microbatch gradients before clipping/AdamW.
+
+    The denominator covers the whole update window, including short terminal
+    chunks and a partial batch at an epoch boundary.
+    """
+    if not math.isfinite(valid_count) or valid_count <= 0:
+        raise ValueError("Accumulation window must contain a finite positive valid action count.")
+    for parameter in parameters:
+        if parameter.grad is not None:
+            parameter.grad.div_(valid_count)
+
+
+def flow_matching_bc(model, batch, *, reduction="mean"):
     """Use official embedding/transformer modules, supervising clean action chunks.
 
     Query embeddings and alignment heads remain in the architecture and export;
@@ -201,5 +220,6 @@ def flow_matching_bc(model, batch):
         ada_cond=time_emb if getattr(flow.config, "adanorm_time", False) else None)
     suffix_out = outputs[1][:, -flow.config.n_action_steps:]
     prediction = flow._fp32_linear(flow.action_out_proj, suffix_out)
-    loss = masked_bc_loss(prediction, noise - actions, batch["joint_mask"], flow.config.loss_type)
+    loss = masked_bc_loss(prediction, noise - actions, batch["joint_mask"], flow.config.loss_type,
+                          reduction=reduction)
     return loss

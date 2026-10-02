@@ -15,6 +15,7 @@ batch_size: 1
 gradient_accumulation: 16
 gradient_checkpointing: true
 chunk_size: 50
+action_chunk_tail: mask
 img_size: 256
 image_augment: false
 num_workers: 0

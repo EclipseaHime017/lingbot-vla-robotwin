@@ -159,6 +159,10 @@ def resume_training_checkpoint(model, optimizer, scheduler, checkpoint, *, expec
     for key in ("base_identity", "manifest_content_sha256", "selection", "norm_sha256", "model_geometry", "qwen_config_sha256"):
         if payload["metadata"].get(key) != expected_metadata.get(key):
             raise ValueError(f"Resume mismatch for {key}; use identical frozen base content, audited clean data and trainable selection.")
+    for key in ("loss_normalization", "data_sampling"):
+        if payload["metadata"].get(key) != expected_metadata.get(key):
+            raise ValueError(f"Resume mismatch for {key}; use the same loss normalization and data sampling. "
+                             "Checkpoints predating the tail/normalization fix cannot provide an exact resume.")
     parameters = dict(model.named_parameters())
     trainable = {name for name, p in parameters.items() if p.requires_grad}
     if set(payload["trainable_state"]) != trainable:
