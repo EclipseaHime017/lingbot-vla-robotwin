@@ -1,130 +1,267 @@
-# LingBot-VLA 2.0 × RoboTwin：clean 数据后训练
+# LingBot-VLA 2.0 × RoboTwin
 
-本目录是天池比赛 532514 的本地开发工程。起点为 `robbyant/lingbot-vla-v2-6b`，训练只使用官方 RoboTwin 2.0 Aloha-AgileX 的 50 任务 × 50 条 clean 示范。比赛规则明确要求行为克隆（BC），在线、离线强化学习均不允许；不能使用 randomized 数据训练。完整规则及来源见 [赛事核查](docs/competition-research.md)，用户提供的正式模板保存在 [official-templates](docs/official-templates)。
+基于 `robbyant/lingbot-vla-v2-6b` 的单 GPU 后训练工程，支持 RoboTwin 2.0 Aloha-AgileX clean 示范数据的下载、转换、训练和动作预测评估。模型以三路 RGB、关节状态和任务指令为输入，通过 flow-matching 行为克隆（BC）学习动作块。
 
-环境安装、两种真实单步训练及导出模型离线推理已完成；已下载全部 clean 原始包，当前转换数据为一个任务的 50 条示范。本机 LoRA 和末两层 action expert 单步训练的峰值显存分别约为 12.60 GiB 和 13.46 GiB。当前没有完整 50 任务训练或闭环成功率成绩。
+当前提供两种训练方式：action attention 的 **LoRA** 微调，以及 **Action Expert** 的部分层或全部层微调。两种方式都冻结视觉语言模型（VLM），支持梯度累积、梯度检查点、训练状态恢复和完整推理权重导出。导出时自动合并 LoRA。仓库另提供离线动作预测和 RoboTwin 闭环仿真入口。
 
-## 环境
+## 1. 仓库框架
 
-Miniconda 全局安装在 Linux home 的 `~/miniconda3`，环境名 `lingbot-vla`（Python 3.12、PyTorch 2.8/CUDA 12.8）和 `robotwin-sim`（Python 3.10），均位于 `~/miniconda3/envs/`。Conda 已初始化到 `~/.bashrc`，新打开的 WSL Bash 终端可直接使用：
-
-```bash
-conda activate lingbot-vla
+```text
+lingbot-vla-robotwin/
+├── configs/                 # 训练 YAML、任务列表、原始数据哈希清单
+│   ├── train_lora.yaml
+│   └── train_expert.yaml
+├── src/lrvla/               # 数据加载、模型适配、训练、checkpoint 和推理
+├── scripts/                 # 环境安装、资源下载、数据转换及诊断入口
+├── tests/                   # 数据、梯度、恢复、导出等回归测试
+├── vendor/                  # 固定版本的 LingBot-VLA 与 RoboTwin 源码
+├── models/                  # 基模权重和 Qwen 处理器资源
+├── data/
+│   ├── raw_archives/        # 原始数据压缩包
+│   ├── raw/                 # 解压后的 HDF5 与指令
+│   ├── lerobot/             # 转换后的 LeRobot 数据
+│   ├── clean_manifest.json  # 任务、轨迹及数据来源索引
+│   └── clean_norm_stats.json
+├── runs/                    # 训练日志、恢复状态和导出权重
+├── artifacts/               # 下载、环境诊断及验证记录
+├── bootstrap/               # 安装器与依赖 wheel 暂存
+├── .cache/                  # pip、Hugging Face 等缓存
+├── requirements-extra.txt
+├── pyproject.toml
+├── train.sh                 # 训练入口
+└── eval.sh                  # 闭环仿真入口
 ```
 
-当前终端如需立即加载初始化，执行 `source ~/.bashrc`。进入项目时，使用项目激活脚本同时设置源码、模型和缓存路径：
+核心模块按职责拆分：`training_data.py` 负责轨迹划分和动作窗口；`training_models.py` 负责可训练参数选择及 BC 损失；`training.py` 执行训练和验证；`training_checkpoint.py` 保存状态、核对恢复条件及合并导出；`training_inference.py` 和 `evaluation.py` 提供推理与评估适配。
+
+`vendor/`、`models/`、`data/`、`runs/`、`artifacts/` 和缓存目录由脚本生成，不纳入 Git。安装环境位于 Linux home 下，项目目录只保存源码、资源和运行输出。
+
+## 2. 环境配置与资源下载
+
+### 2.1 安装训练环境
+
+面向 Linux x86_64，可在 WSL Ubuntu 中进行 CUDA 训练。先进入仓库，安装基础工具，再运行环境脚本：
 
 ```bash
 cd ~/eclipseaws/lingbot-vla-robotwin
+sudo apt-get update
+sudo apt-get install -y python3 git curl ca-certificates build-essential
+
+bash scripts/bootstrap.sh
 source scripts/activate.sh
-python scripts/doctor.py --output artifacts/doctor.json
 ```
 
-新机器配置：
+`bootstrap.sh` 将 Miniconda 安装到 **`~/miniconda3`**，创建 `lingbot-vla` 环境，获取固定版本的 LingBot-VLA 和 RoboTwin 源码并安装依赖。已有 Miniconda 时复用该安装；设置 `CONDA_ROOT` 可指定其他 Linux Conda 前缀。
+
+| 环境 | Python | 主要依赖 | 用途 |
+|---|---|---|---|
+| `lingbot-vla` | 3.12 | PyTorch 2.8.0 / CUDA 12.8、Transformers 4.57.3、LeRobot 0.4.2 | 数据准备、训练、推理 |
+| `robotwin-sim`（可选） | 3.10 | PyTorch 2.8.0 / CUDA 12.8、SAPIEN 3.0.0b1、MPLib 0.2.1、CuRobo 0.7.8 | 闭环仿真 |
+
+默认安装 FlashAttention。本地训练使用 SDPA 和 PyTorch MoE 参考实现，可用以下命令跳过 FlashAttention 安装：
 
 ```bash
-bash scripts/bootstrap.sh
-bash scripts/setup_sim.sh --with-curobo
+INSTALL_FLASH_ATTN=0 bash scripts/bootstrap.sh
 ```
 
-`bootstrap.sh` 固定官方 v2 源码版本；`setup_sim.sh` 使用官方要求的 RoboTwin 提交，并针对 RTX 50 系列使用 CUDA 12.8 的 PyTorch 2.8。仿真上游的 PyTorch 2.4.1/CUDA 12.1 不支持本机 Blackwell，故这里更换了 Torch 版本，评测记录会保留实际软件栈。
+新终端中使用 `source scripts/activate.sh` 激活训练环境，同时设置源码、模型及项目缓存路径。脚本在 WSL 中显式选择并检查 Linux Python、Conda、Git、Curl 等工具，保留现有 PATH。WSL 的 CUDA 接口由 Windows NVIDIA 驱动提供。
 
-项目保留用户的 Windows PATH 和其他环境配置，不主动过滤或隔离。安装和运行入口显式选择并检查 WSL 内的 Linux Python、Conda、Git、Curl 和 CUDA 编译器；工具解析记录见 `artifacts/wsl-tool-resolution.json`，Bash 启动检查见 `artifacts/bash-startup-validation.json`。WSL 使用 Windows NVIDIA 驱动提供的 Linux CUDA 接口，这是正常的 GPU 透传，不安装 Linux NVIDIA 驱动。`CONDA_ROOT` 可指定另一个 Linux Conda 前缀。
+检查训练环境：
 
-WSL 的 CUDA 计算与 NVIDIA Vulkan 渲染是两项独立能力。RoboTwin 官方不支持 WSL 渲染；本机 SAPIEN 相机创建报错 `failed to find a rendering device`，闭环评测需迁移到支持 NVIDIA Vulkan 的原生 Linux。`doctor.py` 对渲染进行隔离测试，闭环评测在加载大模型前也会检查渲染。不能用训练损失或离线动作误差代替任务成功率。
+```bash
+python scripts/doctor.py --scope train --output artifacts/doctor-train.json
+```
 
-## 下载与数据准备
+### 2.2 下载模型与数据
 
-下载脚本按固定 Hugging Face commit 筛选文件，支持断点续传和 SHA256 校验，记录来源到 `artifacts/download_*.json`。基模约 25.5 GB；Qwen3 配置/分词器约 12 MB，基模已经包含 VLM 权重；50 个 clean 原始压缩包约 23.8 GB。仿真对象、机器人和背景资产另外约 14.9 GB，解压和数据转换还需要空间。
-
-`configs/raw_clean_hf_metadata.json` 保存固定官方版本的 50 个 clean 压缩包 SHA256 清单，随代码提交；数据解压与审计使用这份清单核验来源。
+下载脚本固定资源版本，支持断点续传，并记录文件大小及可用的 SHA256 校验信息。
 
 ```bash
 python scripts/download_assets.py --asset base
 python scripts/download_assets.py --asset qwen
 python scripts/download_assets.py --asset clean
+```
+
+| 资源 | 本地路径 |
+|---|---|
+| LingBot-VLA 6B 基模 | `models/lingbot-vla-v2-6b/` |
+| Qwen3-VL 配置、分词器与处理器 | `models/Qwen3-VL-4B-Instruct/` |
+| RoboTwin clean 原始压缩包 | `data/raw_archives/dataset/<task>/aloha-agilex_clean_50.zip` |
+
+基模已经包含 VLM 权重，`qwen` 下载项只获取处理器资源。可先下载单任务，或用 `--plan` 查看资源大小：
+
+```bash
+python scripts/download_assets.py --asset clean --tasks adjust_bottle
+python scripts/download_assets.py --asset base --plan
+```
+
+转换单任务或全部 50 个任务：
+
+```bash
+# 单任务流程验证
+python scripts/prepare_data.py --tasks adjust_bottle --allow-subset
+
+# 全部任务
+python scripts/prepare_data.py --tasks all
+```
+
+当前转换器要求每任务 50 条 Aloha-AgileX clean 示范，输出 LeRobot 数据、manifest 和归一化统计。帧对齐为图像与状态 `[t]` 对应动作 `[t+1]`，动作使用两臂关节与夹爪的 14 维绝对目标，并从原始 seen 指令池选择任务描述。
+
+默认每任务第 0–44 条轨迹用于训练，第 45–49 条用于验证；归一化统计仅从训练轨迹计算。任务按 manifest 合并，样本在每轮打乱，共享一套模型参数。使用任务子集时，数据准备和训练都需要加 `--allow-subset`。
+
+### 2.3 可选：安装仿真环境
+
+闭环仿真需要独立的 `robotwin-sim` 环境及场景资产：
+
+```bash
+bash scripts/setup_sim.sh --with-curobo
+
+source scripts/activate.sh
 python scripts/download_assets.py --asset sim
 python scripts/prepare_sim_assets.py
+
 source scripts/activate.sh robotwin-sim
 cd vendor/RoboTwin
 python script/update_embodiment_config_path.py
 cd ../..
+python scripts/doctor.py --scope sim --output artifacts/doctor-sim.json
+
 source scripts/activate.sh
 ```
 
-先验证一个任务的数据转换：
+`setup_sim.sh --with-curobo` 按需安装 Linux CUDA 12.8 编译器和 C++ 编译工具，编译 CuRobo。训练及离线动作预测只需要 `lingbot-vla` 环境。
+
+闭环运行需要 SAPIEN 相机的 GPU Vulkan 渲染，即使不显示窗口，也需要生成 RGB 观测。本机 WSL 的 CUDA 训练可用，相机渲染尚未通过；闭环运行应使用具备 NVIDIA Vulkan 渲染能力的 Linux 环境，并先通过环境诊断。
+
+## 3. 训练配置与指令
+
+### 3.1 公共配置
+
+训练入口读取 YAML，命令行中提供的参数覆盖 YAML 对应项。两份预设都使用 BF16 常驻权重、FP32 可训练参数及 AdamW，默认只计算动作头的 flow-matching BC 损失。
+
+| YAML 配置 | 默认值 | 含义 |
+|---|---|---|
+| `base_checkpoint` | `models/lingbot-vla-v2-6b` | 基模路径 |
+| `qwen_path` | `models/Qwen3-VL-4B-Instruct` | 处理器资源路径 |
+| `manifest` | `data/clean_manifest.json` | 训练任务及数据索引 |
+| `norm_stats` | `data/clean_norm_stats.json` | 训练数据归一化统计 |
+| `batch_size` | `1` | 每次前向、反向的样本数 |
+| `gradient_accumulation` | `16` | 每次更新累积的小 batch 数 |
+| `max_steps` | `1000` | 优化器更新次数 |
+| `warmup_steps` | `100` | 学习率预热的更新次数 |
+| `chunk_size` | `50` | 每个观测对应的动作块长度 |
+| `action_chunk_tail` | `mask` | 不完整动作窗口的处理方式 |
+| `img_size` | `256` | 图像预处理尺寸 |
+| `image_augment` | `false` | 是否启用训练图像增强 |
+| `num_workers` | `0` | 数据加载 worker 数量 |
+| `val_episodes` | `5` | 每任务留出的验证轨迹数 |
+| `gradient_checkpointing` | `true` | 减少反向传播的激活显存 |
+| `eval_every` / `save_every` | `100` | 验证、保存的更新间隔 |
+| `eval_batches` | `8` | 每次验证最多处理的小 batch 数 |
+| `export` / `export_dtype` | `true` / `bfloat16` | 结束后导出完整推理权重及其精度 |
+
+有效 batch 约为 `batch_size × gradient_accumulation`。例如 `batch_size=8`、累积 4 次、`max_steps=2500`，共执行 **10,000 个小 batch、2,500 次参数更新**。这里的 step、预热、验证和保存间隔都按优化器更新计数。
+
+`action_chunk_tail: mask` 保留轨迹末端观测，padding 不参与损失；累积梯度按整个更新窗口的有效动作坐标数统一归一化。`drop` 只保留训练集的完整动作窗口，验证集仍保留全部观测。截断会减少末段观测作为训练起点的覆盖。
+
+可复制预设 YAML 调整实验。LoRA rank、alpha、学习率、动作块长度和尾部策略等需要修改 YAML；常用命令行覆盖项可通过帮助查看：
 
 ```bash
-python scripts/prepare_data.py --tasks adjust_bottle --allow-subset
+bash train.sh --help
 ```
 
-准备比赛训练数据：
+### 3.2 LoRA
 
-```bash
-python scripts/prepare_data.py --tasks all
+配置文件：[configs/train_lora.yaml](configs/train_lora.yaml)。
+
+```yaml
+mode: lora
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.0
+lora_targets: [q_proj, k_proj, v_proj, o_proj]
+train_projections: true
+lr: 0.0001
+output_dir: runs/lora_clean
 ```
 
-转换遵循固定版本 pi0 处理器的帧对齐：图像与状态 `[t]` 预测关节命令 `[t+1]`，两臂各 6 关节 + 1 夹爪共 14 维；只选官方 seen 指令。不能直接使用另一个公开的 EEF16 LeRobot 数据集，它与此模型的 RoboTwin 映射不兼容。
-
-转换输出 LeRobot 数据、`data/clean_manifest.json` 和 `data/clean_norm_stats.json`。每任务必须恰好 50 条官方示范，默认第 45–49 条做离线验证，归一化只从第 0–44 条计算。数据审计检查来源、示范数、关节和相机映射；不使用上游混合 clean/randomized 的 manifest 或 norm stats。
-
-`--allow-subset` 只用于跑通流程，产物会标记为任务子集。正式联合训练需要全部 50 个任务，共享一份权重。
-
-## 训练
-
-无需下载 6B 权重的合成训练、保存、恢复与 LoRA 合并测试：
+LoRA 加在 Action Expert 36 层 attention 的 q/k/v/o 投影，共 144 个线性层；同时训练 state/action/time 投影。VLM 与动作专家其他主权重冻结。
 
 ```bash
-bash train.sh --smoke --device cuda --output-dir artifacts/training-smoke-cuda
-python -m pytest -q
-```
-
-真实 LoRA 单步验证（先转换 `adjust_bottle`）：
-
-```bash
-bash train.sh --config configs/train_lora.yaml --allow-subset \
-  --max-steps 1 --gradient-accumulation 1 --output-dir runs/lora-one-step
-```
-
-联合训练入口：
-
-```bash
+# 全部任务训练
 bash train.sh --config configs/train_lora.yaml
-bash train.sh --config configs/train_expert.yaml
+
+# 已准备单任务数据时，先验证一次真实更新
+bash train.sh --config configs/train_lora.yaml --allow-subset \
+  --max-steps 1 --gradient-accumulation 1 \
+  --output-dir runs/lora-one-step
+
+# batch 8，累积 4 次，执行 10,000 个小 batch
+bash train.sh --config configs/train_lora.yaml \
+  --batch-size 8 --gradient-accumulation 4 --max-steps 2500 \
+  --output-dir runs/lora-b8-ga4
 ```
 
-LoRA 配置冻结 VLM 和 action MoE 主权重，训练 action attention 的低秩增量与 state/action 投影。action expert 本地配置只训练最后 2/36 层、归一化和投影，是部分 expert 微调。要在服务器训练完整 action expert：
+最后一条命令需要足够显存，使用任务子集时同样加 `--allow-subset`。CPU 计算线程数可通过 `OMP_NUM_THREADS`、`MKL_NUM_THREADS` 调整；显存与吞吐应以实际配置的短测为准。
+
+### 3.3 Action Expert
+
+配置文件：[configs/train_expert.yaml](configs/train_expert.yaml)。
+
+```yaml
+mode: expert
+expert_last_n_layers: 2
+train_projections: true
+lr: 0.00005
+output_dir: runs/expert_partial_clean
+```
+
+默认训练最后 2/36 层的全部参数，包括 attention、MoE 和层归一化，并训练动作专家末层 norm 及 state/action/time 投影。`expert_last_n_layers` 可设为 `1`–`36`，或用 `-1` 选择全部动作专家；VLM 始终冻结。
 
 ```bash
-bash train.sh --config configs/train_expert.yaml --expert-last-n-layers -1 \
-  --output-dir runs/expert-full-clean
+# 默认：末两层 Action Expert
+bash train.sh --config configs/train_expert.yaml
+
+# 单任务部分 Expert 训练
+bash train.sh --config configs/train_expert.yaml --allow-subset \
+  --output-dir runs/expert-subset
+
+# 更大显存服务器：全部 Action Expert
+bash train.sh --config configs/train_expert.yaml \
+  --expert-last-n-layers -1 --output-dir runs/expert-full-clean
+
+# 不加载 6B 权重，检查参数量及显存下界
+bash train.sh --config configs/train_expert.yaml --device cpu --dry-run
 ```
 
-本地实现使用 BF16 常驻权重、FP32 可训练参数/AdamW、冻结前缀 KV、action 层梯度检查点和梯度累积。加载原始 FP32 分片时逐张量转换并直接送入 GPU，避免在 15 GB WSL 内存中复制整个模型。SDPA 和 PyTorch MoE 参考实现保留官方结构和 checkpoint 键，可以先完成本地验证；训练速度与官方 fused/多卡版本不同。显存报告的下界不包含激活和 CUDA 工作区，能否在 16/24 GB 训练须以实际峰值为准。
+`--dry-run` 需要已安装的源码与 Qwen 配置资源，其显存下界不包含激活、KV cache 和临时工作区。全部 Action Expert 的 FP32 梯度及 AdamW 状态需求较大，当前预设面向本地部分层微调；训练入口会在权重和优化器状态下界超过可用显存时拒绝启动。当前入口为单 GPU，未实现 DDP/FSDP 训练。
 
-保存位置：
+### 3.4 保存、恢复与导出
 
 ```text
 runs/<experiment>/
 ├── training_config.yaml / lingbotvla_cli.yaml
 ├── run_metadata.json / episode_splits.json
-├── assets/clean_manifest.json / norm_stats.json
+├── assets/                  # 数据索引、归一化和处理器资源
 ├── configs/robot_configs/robotwin.yaml
 ├── metrics.jsonl / latest_checkpoint.txt
-└── checkpoints/global_step_N/
-    ├── training.pt
-    └── hf_ckpt/                 # 完整权重，LoRA 已合并
+└── checkpoints/
+    ├── global_step_100/training.pt
+    └── global_step_1000/
+        ├── training.pt
+        └── hf_ckpt/         # 结束时导出的完整权重，LoRA 已合并
 ```
 
-恢复训练时传入 `--resume runs/<experiment>/checkpoints/global_step_N/training.pt`。`training.pt` 包含可训练权重、优化器、调度器和进度；`hf_ckpt` 用于推理，不能当作完整优化器恢复状态。
+按 `save_every` 保存 `training.pt`；正常完成训练且 `export: true` 时，在最终 step 目录导出 `hf_ckpt/`。恢复使用 `training.pt`，推理使用 `hf_ckpt/`。
 
-训练默认只计算 action 的 flow-matching BC 损失，保留基模的深度/视频查询及输出头，但不加载教师模型或计算相关辅助损失。默认 BF16 导出节省显存；把这些权重转换为 FP32 不能恢复加载时舍弃的精度。
+```bash
+bash train.sh --config configs/train_lora.yaml \
+  --resume runs/lora_clean/checkpoints/global_step_100/training.pt
+```
 
-`action_chunk_tail: mask`（默认）保留轨迹末端不足未来 `chunk_size` 步的观测，时间 padding 不参与损失。`action_chunk_tail: drop` 只保留训练集的完整动作窗口，验证集仍保留全部观测；它会减少末段状态作为训练起点的覆盖，不会改变输出动作块长度。`drop_last` 只处理不足 batch 的批次，不能替代此设置。当前 `adjust_bottle` 的 6,478 个训练起点中，2,205 个窗口不足 50 步；丢弃后保留 4,273 个，详见 `artifacts/action-chunk-tail-audit.json`。
+恢复时保持基模、数据、归一化、可训练参数、输入几何、batch、累积次数、随机种子及尾部策略一致；可以调整总更新次数和保存间隔。修复前缺少新损失及采样元数据的 checkpoint 不支持新规则下的精确续训。不同配置的实验使用不同 `output_dir`。
 
-梯度累积对整个更新窗口的有效动作坐标求平均，梯度统一归一化后再裁剪和更新，验证损失也按有效坐标加权。采样方式、batch 大小、episode 划分和损失归一化写入 checkpoint，恢复时核对；修复前的 checkpoint 缺少这些信息，不能按新版本进行精确续训。重新实验应使用新的输出目录。
-
-调参使用每任务 45 条训练、5 条验证示范。确定超参数后，可从官方基模重新训练全部 2,500 条 clean 示范；先重算无留出的归一化，再使用相同训练划分：
+要取消验证留出，先重新计算对应的归一化统计，再训练：
 
 ```bash
 python scripts/prepare_data.py --tasks all --audit-only --val-episodes 0
@@ -132,56 +269,28 @@ bash train.sh --config configs/train_lora.yaml --val-episodes 0 \
   --output-dir runs/lora-all-clean
 ```
 
-安装遵循官方 v2 的 Torch/Transformers 固定版本，并以 `--no-deps` 接入 LeRobot 和可选深度源码。`pip check` 会报告其声明版本范围和未安装的可选机器人/教师依赖，记录在 `artifacts/pip-check-training.txt`；实际数据转换和训练使用的接口单独验证。深度教师训练和 LeRobot 机器人遥操作不属于当前入口。
+### 3.5 流程检查与推理
 
-## 测试与评测
+无需 6B 权重的合成训练、保存、恢复及 LoRA 合并检查：
 
-WSL 上可以做 clean 留出示范的动作预测诊断：
+```bash
+bash train.sh --smoke --device cpu --output-dir artifacts/training-smoke
+python -m pytest -q
+```
+
+对导出模型进行离线动作预测，输入包含示范中的 RGB、状态和指令，输出留出轨迹的动作误差：
 
 ```bash
 python scripts/open_loop.py \
   --checkpoint runs/lora-one-step/checkpoints/global_step_1/hf_ckpt
 ```
 
-在支持 SAPIEN NVIDIA Vulkan 的原生 Linux 上，先做一个任务、每种环境 2 次 BF16 闭环验证：
+仿真环境就绪后进行闭环检查：
 
 ```bash
-bash eval.sh --checkpoint runs/lora-one-step/checkpoints/global_step_1/hf_ckpt --smoke
+bash eval.sh --checkpoint runs/lora-one-step/checkpoints/global_step_1/hf_ckpt \
+  --tasks adjust_bottle --setting clean --trials 2 --precision bf16 \
+  --use-length 10
 ```
 
-完整比赛评测：
-
-```bash
-bash eval.sh --checkpoint runs/lora_clean/checkpoints/global_step_1000/hf_ckpt \
-  --tasks all --setting both --trials 100 --precision fp32 --team-id YOUR_TEAM_ID
-```
-
-50 个任务 × 两种 setting × 100 次，共 10,000 次。只有足够显存的服务器能运行完整 FP32；本机 24 GB 使用 BF16 诊断，16 GB 还需更小模型输入或服务器。默认本地流式服务器的 SDPA/MoE 数值与官方 fused 内核等价性尚未完成验证；使用原生官方服务器加 `--native-server`，但其初始化需要大量主机内存。官方 clean+randomized 参考成绩为 clean 93.52%、randomized 92.80%，不能把它当作 clean-only 已复现成绩。
-
-评测修改保存在 `src/lrvla/evaluation.py`，运行时生成 client 副本，不修改官方仓库：clean 用 seen 指令、randomized 用 unseen 指令；每场景至多启动 5 次专家尝试，耗尽后仍运行模型；只加载一份固定权重，重置不切换模型；成功采用 `check_success()`。程序保存计数与进程状态，失败任务不能默认为完成。
-
-结果目录包含详细 `results.json`、独立的精度/命令记录和按附件正式 schema 输出的 `official_results.json`。缺测任务为 `0/0`，不能当作零成功率或完整比赛结果。正式提交使用自己的团队 ID。
-
-## 材料打包与迁移
-
-完成真实训练和评测后，按附件 [复现报告模板](docs/official-templates/复现与调优说明模板.md)填写报告，并打包到本地：
-
-```bash
-python scripts/package_submission.py \
-  --results runs/evaluation/<run>/official_results.json \
-  --run runs/lora_clean \
-  --report reproduction_report.md \
-  --output artifacts/submission.zip
-```
-
-脚本校验正式 JSON 字段及次数，拒绝把空模板打包成测得结果。`02_代码材料` 包含 README、train.sh、eval.sh、configs、src、scripts；`03_模型材料` 保留完整单份导出权重。用户账户凭据、Conda 环境、缓存和数据不进入包。这里只生成本地文件，上传比赛由用户完成。
-
-结果须携带同目录的 `evaluation_plan.json` 和详细 `results.json`；打包会核对实测计数及实际评测权重的 SHA256，避免把一个模型的结果配给另一个模型。默认随包保存官方源码和 SHA256 快照，解压后无需 `.git` 即可校验版本并运行安装脚本；`--no-vendor` 可改为安装时按固定提交重新下载。
-
-迁移时保留源代码、官方版本记录、模型、clean 数据和训练输出，重新运行两个环境安装脚本。不要复制 WSL 的 Conda 前缀到不同路径。需要恢复优化器时另外保留 `training.pt`；仅部署则使用完整 `hf_ckpt` 与其 run 配置/归一化。初始流程使用单 GPU；大规模多卡训练可基于已固定的官方训练入口继续开发，当前本地 LoRA/部分 expert 入口不声称支持 DDP/FSDP。
-
-## 目录
-
-`vendor/` 是固定版本官方源码；`src/lrvla/` 是数据审计、训练适配、流式加载和评测逻辑；`configs/` 为本地训练配置；`scripts/` 为安装/下载/转换/诊断入口；`tests/` 验证数据隔离、动作掩码、梯度、恢复、合并导出和真实 JSON schema；`artifacts/` 保存实际安装和验证记录。
-
-`docs/` 中仅官方附件模板和附官方来源的赛事规则核查纳入 Git 与提交包；提交规范、开发说明和本机验证记录保留本地并忽略。
+默认每次生成 50 条动作，`--use-length 10` 返回并执行前 10 条，然后获取新观测重新规划。离线动作误差用于预测诊断，闭环结果用于衡量实际任务成功率。评估入口使用命令行参数；训练使用 YAML。
