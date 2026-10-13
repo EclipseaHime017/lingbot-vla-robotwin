@@ -95,7 +95,8 @@ def merged_state_items(model, dtype=torch.bfloat16):
         yield name, value.contiguous()
 
 
-def export_hf_checkpoint(model, output, *, dtype=torch.bfloat16, max_shard_bytes=512 * 2**20, processor=None):
+def export_hf_checkpoint(model, output, *, dtype=torch.bfloat16, max_shard_bytes=512 * 2**20, processor=None,
+                         state_items=None):
     output = Path(output)
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f"Refusing to mix an export with existing files: {output}")
@@ -113,7 +114,12 @@ def export_hf_checkpoint(model, output, *, dtype=torch.bfloat16, max_shard_bytes
         shards.append(filename)
         shard, shard_bytes = {}, 0
 
-    for name, value in merged_state_items(model, dtype):
+    items = merged_state_items(model, dtype) if state_items is None else state_items
+    for name, value in items:
+        value = value.detach().cpu()
+        if value.is_floating_point():
+            value = value.to(dtype)
+        value = value.contiguous()
         size = value.numel() * value.element_size()
         if shard and shard_bytes + size > max_shard_bytes:
             flush()

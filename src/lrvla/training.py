@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import random
 import shutil
@@ -114,6 +115,9 @@ def portable_inference_cli(cli):
 
 
 def train(config, *, dry_run=False):
+    if int(os.environ.get("WORLD_SIZE", "1")) > 1 and not dry_run:
+        from .training_distributed import train_distributed
+        return train_distributed(config)
     action_chunk_tail = config.get("action_chunk_tail", "mask")
     if action_chunk_tail not in {"mask", "drop"}:
         raise ValueError("action_chunk_tail must be 'mask' or 'drop'.")
@@ -286,6 +290,7 @@ def main(argv=None):
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--gradient-accumulation", type=int)
+    parser.add_argument("--global-batch-size", type=int)
     parser.add_argument("--expert-last-n-layers", type=int)
     parser.add_argument("--val-episodes", type=int)
     parser.add_argument("--resume")
@@ -300,6 +305,8 @@ def main(argv=None):
     for key, value in vars(args).items():
         if key not in {"config", "dry_run", "smoke", "allow_subset"} and value is not None:
             config[key] = value
+    if args.gradient_accumulation is not None and args.global_batch_size is None:
+        config.pop("global_batch_size", None)
     if args.allow_subset:
         config["allow_subset"] = True
     return train(config, dry_run=args.dry_run)

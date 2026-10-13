@@ -1,0 +1,16 @@
+#!/bin/bash
+# Pass a verified project ID with qsub -P; no project is assumed here.
+#PBS -N lrvla-setup
+#PBS -q normal
+#PBS -l select=1:ncpus=4:mem=16gb
+#PBS -l walltime=02:00:00
+#PBS -j oe
+set -euo pipefail
+umask 077
+: "${PBS_JOBID:?Submit this installer through PBS}"
+: "${PBS_O_WORKDIR:?PBS submission directory is missing}"
+cd "$PBS_O_WORKDIR"
+mkdir -p artifacts
+exec > >(/usr/bin/tee -a "artifacts/nscc-bootstrap-${PBS_JOBID}.log") 2>&1
+printf 'Bootstrap job %s on %s at %s\n' "$PBS_JOBID" "$(hostname)" "$(date -Is)"
+exec /bin/bash scripts/hpc/bootstrap.sh

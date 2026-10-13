@@ -1,8 +1,8 @@
 # LingBot-VLA 2.0 × RoboTwin
 
-基于 `robbyant/lingbot-vla-v2-6b` 的单 GPU 后训练工程，支持 RoboTwin 2.0 Aloha-AgileX clean 示范数据的下载、转换、训练和动作预测评估。模型以三路 RGB、关节状态和任务指令为输入，通过 flow-matching 行为克隆（BC）学习动作块。
+基于 `robbyant/lingbot-vla-v2-6b` 的后训练工程，支持 RoboTwin 2.0 Aloha-AgileX clean 示范数据的下载、转换、训练和动作预测评估。模型以三路 RGB、关节状态和任务指令为输入，通过 flow-matching 行为克隆（BC）学习动作块。
 
-当前提供两种训练方式：action attention 的 **LoRA** 微调，以及 **Action Expert** 的部分层或全部层微调。两种方式都冻结视觉语言模型（VLM），支持梯度累积、梯度检查点、训练状态恢复和完整推理权重导出。导出时自动合并 LoRA。仓库另提供离线动作预测和 RoboTwin 闭环仿真入口。
+当前提供两种训练方式：action attention 的 **LoRA** 微调，以及 **Action Expert** 的部分层或全部层微调。两种方式都冻结视觉语言模型（VLM），支持梯度累积、梯度检查点、训练状态恢复和完整推理权重导出；完整 Expert 支持多卡 FSDP 训练。导出时自动合并 LoRA。仓库另提供离线动作预测和 RoboTwin 闭环仿真入口。
 
 ## 1. 仓库框架
 
@@ -10,9 +10,11 @@
 lingbot-vla-robotwin/
 ├── configs/                 # 训练 YAML、任务列表、原始数据哈希清单
 │   ├── train_lora.yaml
-│   └── train_expert.yaml
+│   ├── train_expert.yaml
+│   └── train_expert_full.yaml # 多卡完整 Action Expert，VLM 冻结
 ├── src/lrvla/               # 数据加载、模型适配、训练、checkpoint 和推理
 ├── scripts/                 # 环境安装、资源下载、数据转换及诊断入口
+│   └── hpc/                 # SSH 连接、计算节点安装及单／多 GPU PBS 作业生成器
 ├── tests/                   # 数据、梯度、恢复、导出等回归测试
 ├── vendor/                  # 固定版本的 LingBot-VLA 与 RoboTwin 源码
 ├── models/                  # 基模权重和 Qwen 处理器资源
@@ -27,6 +29,7 @@ lingbot-vla-robotwin/
 ├── bootstrap/               # 安装器与依赖 wheel 暂存
 ├── .cache/                  # pip、Hugging Face 等缓存
 ├── requirements-extra.txt
+├── requirements-visualization.txt  # 可选的数据集查看器
 ├── pyproject.toml
 ├── train.sh                 # 训练入口
 └── eval.sh                  # 闭环仿真入口
@@ -63,6 +66,8 @@ source scripts/activate.sh
 ```bash
 INSTALL_FLASH_ATTN=0 bash scripts/bootstrap.sh
 ```
+
+可选的 Rerun 数据集查看器依赖单列在 `requirements-visualization.txt`，本地默认安装，可设置 `INSTALL_RERUN=0` 跳过。训练、数据转换和动作预测不使用该查看器。
 
 新终端中使用 `source scripts/activate.sh` 激活训练环境，同时设置源码、模型及项目缓存路径。脚本在 WSL 中显式选择并检查 Linux Python、Conda、Git、Curl 等工具，保留现有 PATH。WSL 的 CUDA 接口由 Windows NVIDIA 驱动提供。
 
@@ -132,6 +137,33 @@ source scripts/activate.sh
 `setup_sim.sh --with-curobo` 按需安装 Linux CUDA 12.8 编译器和 C++ 编译工具，编译 CuRobo。训练及离线动作预测只需要 `lingbot-vla` 环境。
 
 闭环运行需要 SAPIEN 相机的 GPU Vulkan 渲染，即使不显示窗口，也需要生成 RGB 观测。本机 WSL 的 CUDA 训练可用，相机渲染尚未通过；闭环运行应使用具备 NVIDIA Vulkan 渲染能力的 Linux 环境，并先通过环境诊断。
+
+### 2.4 NSCC / PBS 服务器
+
+NSCC ASPIRE 2A 使用 PBS，登录节点负责文件管理和作业提交，安装、转换与训练在计算节点进行。NTU 等成员机构用户注册后会自动获得 `personal-<userid>` 个人项目，使用 ASPIRE 2A 的个人额度无需加入 PI 的研究项目；其他用户或使用 ASPIRE 2A+ 时需要有效的 SRA 项目。[账号与项目指南](https://nsccsg.github.io/quickstart/get-an-account-and-a-project/)。
+
+个人项目提交时可使用 `-P personal`，PBS 自动填入对应用户名的项目名；已有研究项目时改用获授权的项目编号。[PBS 作业培训文档，第 17 页](https://help.nscc.sg/wp-content/uploads/ASPIRE2A-ADVANCED-JOB-MANAGEMENT-TRAINING_GUIDE.pdf#page=17)。提交前检查登录时显示的 SU 余额，并用 `myquota` 查看 HOME、scratch 和可用项目存储；`myprojects` 查询为空不能单独证明个人额度不可用，实际提交状态及 `qstat -f` 中的说明仍需核对。
+
+服务器系统 Python 可能较旧，使用独立 HPC 安装入口。它将 Miniconda 安装在 `~/miniconda3`，保持现有依赖版本，默认跳过 FlashAttention 和可选的 Rerun 查看器，不执行 `conda init` 或修改登录 profile。Rerun 0.22.1 的 Linux wheel 要求 glibc ≥ 2.31，NSCC 的 RHEL 8 使用 glibc 2.28；服务器训练无需安装该查看器。进入已上传的源码目录后，使用个人项目提交安装作业：
+
+```bash
+cd ~/eclipseaws/lingbot-vla-robotwin
+NSCC_PROJECT_ID=personal
+qsub -P "$NSCC_PROJECT_ID" scripts/hpc/bootstrap.pbs
+```
+
+安装作业默认申请 4 个 CPU、16GB 内存和 2 小时墙时，不申请 GPU。`scripts/hpc/bootstrap.sh` 检查 `PBS_JOBID`，拒绝在普通登录会话中安装。个人项目也可完成环境配置和训练，无需先取得 project 存储。HOME 额度为 50GB，可放 Conda、源码和小型 checkpoint；大模型、数据及缓存可放 scratch，并在本地或其他持久存储保留备份。scratch 默认额度为 100TB，超过 30 天未使用的文件可能被清理，重要训练结果应及时转存。有研究项目存储权限时，也可按实际配额安排文件。[配额与清理策略](https://help.nscc.sg/aspire2a/faqs/)。
+
+ASPIRE 2A 与 2A+ 当前禁用 SSH key 登录，需使用密码或 NSCC 批准的替代方式。可在本机配置 SSH ControlMaster，复用已经完成密码认证的连接；不要在脚本中保存密码。[NSCC 访问政策](https://help.nscc.sg/aspire2aplus/immediate-action-required-change-to-ssh-access-method-for-aspire-2a-and-aspire-2a-system/)。
+
+已有本地登录信息时，可用 `scripts/hpc/connect_ssh.py` 建立共享连接。默认读取仓库根目录的 `sshkey.txt`，其中一行是 `ssh <userid>@<login-host>`，另一行是 `password <字面密码>`。该文件已被 Git 忽略，应保持仅当前用户可读写：
+
+```bash
+chmod 600 sshkey.txt
+/usr/bin/python3 scripts/hpc/connect_ssh.py
+```
+
+入口优先复用已有连接；连接失效或 WSL 重启后，读取本地登录信息重新认证，并新建空闲保留 24 小时的后台连接。密码由 OpenSSH 的认证助手读取，不放入命令行参数、环境变量或日志。使用 `/usr/bin/python3 scripts/hpc/connect_ssh.py --verify-login` 可通过独立连接检查认证，确认能够重新登录。
 
 ## 3. 训练配置与指令
 
@@ -294,3 +326,65 @@ bash eval.sh --checkpoint runs/lora-one-step/checkpoints/global_step_1/hf_ckpt \
 ```
 
 默认每次生成 50 条动作，`--use-length 10` 返回并执行前 10 条，然后获取新观测重新规划。离线动作误差用于预测诊断，闭环结果用于衡量实际任务成功率。评估入口使用命令行参数；训练使用 YAML。
+
+### 3.6 单 GPU PBS 作业
+
+环境与数据准备完成后，在服务器上的仓库目录生成一次 LoRA 流程检查作业：
+
+```bash
+source scripts/activate.sh
+NSCC_PROJECT_ID=personal
+python scripts/hpc/submit_pbs.py \
+  --project "$NSCC_PROJECT_ID" --queue normal \
+  --workdir "$PWD" --config configs/train_lora.yaml \
+  --conda-root "$CONDA_ROOT" --walltime 00:20:00 \
+  --allow-subset --max-steps 1 --gradient-accumulation 1 \
+  --train-output-dir "$PWD/runs/nscc-lora-smoke"
+```
+
+默认只生成 `artifacts/pbs/lrvla.pbs`，不提交；检查脚本后在同一命令末尾添加 `--submit` 才执行 `qsub`。默认申请一张 GPU，`--gpus 4` 或 `--gpus 8` 启动单节点多卡。脚本保留调度器的 GPU 绑定，并检查 Torch 可见 GPU 数与申请数量一致。使用 `ai` 队列需要对应项目授权。
+
+`--output-dir` 指定 PBS 脚本及日志位置，`--train-output-dir` 指定训练输出。运行日志按完整 `PBS_JOBID` 写入 `artifacts/pbs/logs/`；可通过 `qstat -f <job-id>`、`metrics.jsonl` 和 `latest_checkpoint.txt` 检查状态。PBS 墙时或终止信号不会额外触发 checkpoint，续训从最近一次正常保存的 checkpoint 开始；根据实际步时设置保存间隔。
+
+### 3.7 多卡完整 Action Expert
+
+`configs/train_expert_full.yaml` 使用 `mode: expert`、`expert_last_n_layers: -1`，训练全部 36 层 Expert 及状态／动作投影，冻结视觉语言 backbone。可训练参数约 17.89 亿。`torchrun` 启动时，训练入口使用 FSDP 分片 Expert 参数、梯度和 AdamW 状态；`fsdp_wrap: decoder_layer` 按解码层分别包装，将临时汇集的参数组由约 6.66 GiB 降到每层约 0.185 GiB。冻结参数保持 BF16，每张卡保留一份，Expert 的参数及优化器状态使用 FP32，计算使用 BF16 autocast。
+
+当前预设面向四卡：每卡 batch 为 16，`global_batch_size: 64`，`gradient_accumulation: 1`，不做梯度累积；`require_no_gradient_accumulation: true` 防止修改每卡 batch 后自动引入累积。每项作业执行 1000 次优化器更新，合计约 64000 个训练样本。50 个 clean 任务按帧合并并随机打乱；每任务前 45 个 episode 训练，后 5 个验证。终止帧保留，填充动作不计入损失。损失按全部 GPU 的有效动作坐标总数归一化。学习率为 `5e-5`，前 100 次更新预热，每 100 次更新验证和保存。
+
+准备好全部 clean 数据及其 norm provenance 后，可通过 `--batch-policy` 选择两种运行方式。`fixed` 使用指定 batch，出错后停止；`cuda-oom` 只在 CUDA 显存不足时，从基模重新开始一次较小 batch 的训练。每卡 batch 与全局 batch 必须同时匹配 GPU 数。
+
+手动固定四卡 batch 64：
+
+```bash
+source scripts/activate.sh
+python scripts/hpc/submit_pbs.py \
+  --project personal --queue normal --gpus 4 \
+  --workdir "$PWD" --config configs/train_expert_full.yaml \
+  --conda-root "$CONDA_ROOT" --job-name expert4fixed --walltime 24:00:00 \
+  --batch-policy fixed \
+  --batch-size 16 --global-batch-size 64 --gradient-accumulation 1 \
+  --train-output-dir "$PWD/runs/expert4-fixed64"
+```
+
+手动固定 batch 32 时，将上面的每卡 batch 改为 `--batch-size 8`，全局 batch 改为 `--global-batch-size 32`，并使用新的作业名和输出目录；`--gradient-accumulation 1` 保持不变。也可直接在训练 YAML 中同步设置 `batch_size: 8`、`global_batch_size: 32`、`gradient_accumulation: 1`，省略这三个命令行覆盖参数。命令行参数优先于训练 YAML。
+
+自动在 CUDA 显存不足时由 batch 64 降为 32：
+
+```bash
+python scripts/hpc/submit_pbs.py \
+  --project personal --queue normal --gpus 4 \
+  --workdir "$PWD" --config configs/train_expert_full.yaml \
+  --conda-root "$CONDA_ROOT" --job-name expert4auto --walltime 24:00:00 \
+  --batch-policy cuda-oom \
+  --global-batch-size 64 --fallback-global-batch-size 32 \
+  --train-output-dir "$PWD/runs/expert4-auto64-32"
+```
+
+自动方案根据 GPU 数计算两次尝试的每卡 batch，并固定不累积，不能额外指定 `--batch-size`、`--gradient-accumulation` 或 `--resume`。未指定 `--batch-policy` 时，提供 `--fallback-global-batch-size` 会沿用自动方案，否则使用固定方案，兼容已有提交命令。
+
+两条命令默认生成脚本，添加 `--submit` 提交。可添加 `--dependency afterok:<环境作业ID>:<数据作业ID>`，让训练等待前置作业成功。普通池单节点最多四卡；八卡 AI 池需要获准使用该队列的项目，墙时必须大于 2 小时且不超过 24 小时。八卡固定 batch 64 对应每卡 batch 8、累积 1。各作业应使用独立目录，多卡默认墙时为 24 小时。
+
+自动方案先使用真实全局 batch 64（每卡 16）。只有发生明确的 CUDA 显存不足时，启动器才终止本次训练的全部 rank，并从基模重新开始全局 batch 32（每卡 8），仍不累积。两个尝试分别写入 `batch64/` 和 `batch32/`，尝试记录位于 `attempts.json`；较小 batch 完成 1000 次更新时消费约 32000 个样本。非显存错误不会自动降低 batch，两种 batch 都显存不足时作业失败并保留日志。增加 batch 后的实际显存与吞吐以正式训练日志为准。
+
+完整 Expert 的每次分片 checkpoint 总计约 20 GiB，应将 `runs/` 放在足够大的存储中。多卡 checkpoint 是包含 `shards/`、每 rank 随机状态及 `complete.json` 的目录；`latest_checkpoint.txt` 指向此目录。使用 `--resume <目录>` 恢复，要求相同 GPU 数和数据采样配置。训练结束后只由 rank 0 导出完整、可独立推理的 `hf_ckpt`，其中包含冻结 backbone 和训练后的 Expert。日志记录每张卡的实际分配／保留显存峰值、更新耗时及 checkpoint 耗时。

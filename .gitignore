@@ -17,3 +17,6 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .env
+
+# personal
+sshkey.txt

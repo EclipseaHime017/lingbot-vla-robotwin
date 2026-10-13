@@ -27,8 +27,34 @@ conda activate "${LRVLA_ENV_NAME}"
 if [[ "${LRVLA_ENV_NAME}" == robotwin-sim ]]; then
     export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 fi
+LRVLA_GIT_PATH="${LRVLA_GIT:-${BOOTSTRAP_GIT:-/usr/bin/git}}"
+if [[ -z "${LRVLA_GIT:-}" && -z "${BOOTSTRAP_GIT:-}" && ! -x /usr/bin/git ]]; then
+    LRVLA_GIT_PATH="$(command -v git || true)"
+    if [[ -z "${LRVLA_GIT_PATH}" && -n "${PBS_JOBID:-}" ]]; then
+        # The NSCC compute image provides Git through a shared environment module.
+        LRVLA_GIT_MODULE_STATUS=0
+        if ! type module >/dev/null 2>&1; then
+            if [[ -r /usr/share/Modules/init/bash ]]; then
+                source /usr/share/Modules/init/bash || LRVLA_GIT_MODULE_STATUS=$?
+            else
+                LRVLA_GIT_MODULE_STATUS=1
+            fi
+        fi
+        if [[ "${LRVLA_GIT_MODULE_STATUS}" == 0 ]]; then
+            module load "${BOOTSTRAP_GIT_MODULE:-git/2.39.2}" || LRVLA_GIT_MODULE_STATUS=$?
+        fi
+        if [[ "${LRVLA_GIT_MODULE_STATUS}" != 0 ]]; then
+            printf 'Cannot initialize Linux Git. Set LRVLA_GIT to a Linux Git executable.\n' >&2
+            [[ "${LRVLA_RESTORE_NOUNSET}" == 1 ]] && set -u
+            unset LRVLA_GIT_MODULE_STATUS LRVLA_RESTORE_NOUNSET LRVLA_GIT_PATH
+            return 1
+        fi
+        LRVLA_GIT_PATH="$(command -v git || true)"
+        unset LRVLA_GIT_MODULE_STATUS
+    fi
+fi
 [[ "${LRVLA_RESTORE_NOUNSET}" == 1 ]] && set -u
 unset LRVLA_RESTORE_NOUNSET
 "${CONDA_PREFIX}/bin/python" "${LRVLA_ROOT}/scripts/check_wsl_tools.py" \
-    "python=${CONDA_PREFIX}/bin/python" git=/usr/bin/git curl=/usr/bin/curl >/dev/null || return 1
-unset LRVLA_ENV_NAME
+    "python=${CONDA_PREFIX}/bin/python" "git=${LRVLA_GIT_PATH}" curl=/usr/bin/curl >/dev/null || return 1
+unset LRVLA_ENV_NAME LRVLA_GIT_PATH

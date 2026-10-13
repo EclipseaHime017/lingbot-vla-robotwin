@@ -7,7 +7,19 @@ export PIP_CACHE_DIR="${PROJECT_DIR}/.cache/pip"
 export PYTHONNOUSERSITE=1
 export CONDA_ROOT="${CONDA_ROOT:-${HOME}/miniconda3}"
 export CONDA_ENVS_PATH="${CONDA_ROOT}/envs"
-/usr/bin/python3 scripts/check_wsl_tools.py bash=/bin/bash git=/usr/bin/git \
+BOOTSTRAP_PYTHON="${BOOTSTRAP_PYTHON:-/usr/bin/python3}"
+BOOTSTRAP_INIT_BASH="${BOOTSTRAP_INIT_BASH:-1}"
+BOOTSTRAP_GIT="${BOOTSTRAP_GIT:-/usr/bin/git}"
+INSTALL_RERUN="${INSTALL_RERUN:-1}"
+if [[ "${BOOTSTRAP_INIT_BASH}" != 0 && "${BOOTSTRAP_INIT_BASH}" != 1 ]]; then
+    printf 'BOOTSTRAP_INIT_BASH must be 0 or 1.\n' >&2
+    exit 2
+fi
+if [[ "${INSTALL_RERUN}" != 0 && "${INSTALL_RERUN}" != 1 ]]; then
+    printf 'INSTALL_RERUN must be 0 or 1.\n' >&2
+    exit 2
+fi
+"${BOOTSTRAP_PYTHON}" scripts/check_wsl_tools.py bash=/bin/bash "git=${BOOTSTRAP_GIT}" \
     curl=/usr/bin/curl sha256sum=/usr/bin/sha256sum >/dev/null
 INSTALLER="Miniconda3-py314_26.7.1-1-Linux-x86_64.sh"
 # Snapshot verified against https://repo.anaconda.com/miniconda/ on 2026-10-01.
@@ -21,8 +33,10 @@ if [[ ! -x "${CONDA_ROOT}/bin/conda" ]]; then
         /bin/bash "bootstrap/${INSTALLER}" -b -p "${CONDA_ROOT}"
     fi
 fi
-/usr/bin/python3 scripts/check_wsl_tools.py "conda=${CONDA_ROOT}/bin/conda" >/dev/null
-"${CONDA_ROOT}/bin/conda" init bash
+"${BOOTSTRAP_PYTHON}" scripts/check_wsl_tools.py "conda=${CONDA_ROOT}/bin/conda" >/dev/null
+if [[ "${BOOTSTRAP_INIT_BASH}" == 1 ]]; then
+    "${CONDA_ROOT}/bin/conda" init bash
+fi
 source "${CONDA_ROOT}/etc/profile.d/conda.sh"
 if [[ ! -x "${CONDA_ROOT}/envs/lingbot-vla/bin/python" ]]; then
     conda create --override-channels -c conda-forge -n lingbot-vla python=3.12 pip 'ffmpeg<8' -y
@@ -43,23 +57,26 @@ ROBOTWIN_REV=13c3c47ff4312dd62484bcd51be034af55c062d1
 prepare_upstream_source() {
     local repository="$1" remote="$2" revision="$3"
     if [[ -e "${repository}/.git" ]]; then
-        /usr/bin/git -C "$repository" cat-file -e "${revision}^{commit}" || /usr/bin/git -C "$repository" fetch --depth 1 origin "$revision"
-        /usr/bin/git -C "$repository" checkout --detach "$revision"
+        "${BOOTSTRAP_GIT}" -C "$repository" cat-file -e "${revision}^{commit}" || "${BOOTSTRAP_GIT}" -C "$repository" fetch --depth 1 origin "$revision"
+        "${BOOTSTRAP_GIT}" -C "$repository" checkout --detach "$revision"
     elif [[ -f "${repository}/.lrvla_snapshot.json" ]]; then
-        /usr/bin/python3 scripts/verify_vendor_snapshot.py "$repository" "$revision"
+        "${BOOTSTRAP_PYTHON:-/usr/bin/python3}" scripts/verify_vendor_snapshot.py "$repository" "$revision"
     elif [[ -d "$repository" && -n "$(/usr/bin/find "$repository" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
         printf 'Existing vendor directory has no Git metadata or verified snapshot: %s. Use an intact submitted snapshot or a fresh pinned clone.\n' "$repository" >&2
         return 1
     else
-        /usr/bin/git clone --depth 1 "$remote" "$repository"
-        /usr/bin/git -C "$repository" cat-file -e "${revision}^{commit}" || /usr/bin/git -C "$repository" fetch --depth 1 origin "$revision"
-        /usr/bin/git -C "$repository" checkout --detach "$revision"
+        "${BOOTSTRAP_GIT}" clone --depth 1 "$remote" "$repository"
+        "${BOOTSTRAP_GIT}" -C "$repository" cat-file -e "${revision}^{commit}" || "${BOOTSTRAP_GIT}" -C "$repository" fetch --depth 1 origin "$revision"
+        "${BOOTSTRAP_GIT}" -C "$repository" checkout --detach "$revision"
     fi
 }
 prepare_upstream_source vendor/lingbot-vla-v2 https://github.com/Robbyant/lingbot-vla-v2.git "$VLA_REV"
 prepare_upstream_source vendor/RoboTwin https://github.com/RoboTwin-Platform/RoboTwin.git "$ROBOTWIN_REV"
 "${CONDA_PREFIX}/bin/python" -m pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://pypi.org/simple
 "${CONDA_PREFIX}/bin/python" -m pip install -r vendor/lingbot-vla-v2/requirements.txt -r requirements-extra.txt
+if [[ "${INSTALL_RERUN}" == 1 ]]; then
+    "${CONDA_PREFIX}/bin/python" -m pip install -r requirements-visualization.txt
+fi
 "${CONDA_PREFIX}/bin/python" -m pip install numpydantic==1.9.0 --no-deps
 "${CONDA_PREFIX}/bin/python" -m pip install --no-deps 'lerobot @ https://github.com/huggingface/lerobot/archive/refs/tags/v0.4.2.tar.gz'
 "${CONDA_PREFIX}/bin/python" -m pip install --no-deps -e vendor/lingbot-vla-v2

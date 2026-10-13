@@ -1,0 +1,2 @@
+# Optional LeRobot dataset viewer; its Linux wheel requires glibc >= 2.31.
+rerun-sdk==0.22.1

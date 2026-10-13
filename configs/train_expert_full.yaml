@@ -1,0 +1,40 @@
+# Full action expert behavior cloning: all 36 expert layers and projections.
+# The vision/language backbone remains frozen. Multi-GPU training shards the
+# action expert's parameters, gradients and Adam state through FSDP.
+# Four-GPU preset: global batch 64 = 16 samples per GPU, no accumulation.
+# PBS --batch-policy fixed keeps one batch; cuda-oom with an explicit fallback
+# can retry global batch 32 (8/GPU). Batch policy belongs to the PBS launcher.
+mode: expert
+expert_last_n_layers: -1
+base_checkpoint: models/lingbot-vla-v2-6b
+qwen_path: models/Qwen3-VL-4B-Instruct
+architecture_yaml: vendor/lingbot-vla-v2/configs/vla/robotwin/robotwin.yaml
+manifest: data/clean_manifest.json
+norm_stats: data/clean_norm_stats.json
+output_dir: runs/expert_full_clean
+device: cuda
+train_projections: true
+batch_size: 16
+global_batch_size: 64
+gradient_accumulation: 1
+require_no_gradient_accumulation: true
+fsdp_wrap: decoder_layer
+gradient_checkpointing: true
+chunk_size: 50
+# Retain terminal observations and exclude padded coordinates from the BC loss.
+action_chunk_tail: mask
+img_size: 256
+image_augment: false
+num_workers: 0
+val_episodes: 5
+seed: 42
+lr: 0.00005
+weight_decay: 0.01
+max_grad_norm: 1.0
+warmup_steps: 100
+max_steps: 1000
+eval_every: 100
+eval_batches: 8
+save_every: 100
+export: true
+export_dtype: bfloat16
