@@ -11,8 +11,8 @@ import time
 import pytest
 
 
-SOURCE = Path(__file__).parents[1] / "scripts/hpc/run_with_batch_fallback.py"
-spec = importlib.util.spec_from_file_location("hpc_batch_fallback", SOURCE)
+SOURCE = Path(__file__).parents[1] / "scripts/run_with_batch_fallback.py"
+spec = importlib.util.spec_from_file_location("batch_fallback", SOURCE)
 launcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launcher)
 

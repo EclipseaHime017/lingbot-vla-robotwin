@@ -10,7 +10,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from lrvla.training_identity import base_checkpoint_identity
+from lrvla.training_identity import base_checkpoint_identity  # noqa: E402
 TEMPLATE = ROOT / "docs/official-templates/初赛评测结果模板_JSON版.json"
 
 
@@ -47,6 +47,9 @@ def iter_code_files(root: Path):
         yield path
     for directory in ("scripts", "src", "configs", "docs/official-templates"):
         for path in sorted((root / directory).rglob("*")):
+            relative = path.relative_to(root)
+            if relative.is_relative_to("scripts/hpc") or any("nscc" in part.lower() for part in relative.parts):
+                continue
             if path.is_file() and not any(part in {"__pycache__", ".pytest_cache"} for part in path.parts) and path.suffix != ".pyc":
                 yield path
     research = root / "docs/competition-research.md"

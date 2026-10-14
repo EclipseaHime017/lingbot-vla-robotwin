@@ -18,5 +18,8 @@ __pycache__/
 .pytest_cache/
 .env
 
-# personal
+# Local cluster operations and connection credentials
+/scripts/hpc/
+/tests/test_hpc_*.py
+*[Nn][Ss][Cc][Cc]*
 sshkey.txt

@@ -2,8 +2,8 @@
 # The vision/language backbone remains frozen. Multi-GPU training shards the
 # action expert's parameters, gradients and Adam state through FSDP.
 # Four-GPU preset: global batch 64 = 16 samples per GPU, no accumulation.
-# PBS --batch-policy fixed keeps one batch; cuda-oom with an explicit fallback
-# can retry global batch 32 (8/GPU). Batch policy belongs to the PBS launcher.
+# Direct torchrun keeps the configured batch. The optional batch fallback
+# launcher can retry global batch 32 (8/GPU) after an explicit CUDA OOM.
 mode: expert
 expert_last_n_layers: -1
 base_checkpoint: models/lingbot-vla-v2-6b

@@ -48,7 +48,9 @@ def test_code_package_preserves_official_docs_and_excludes_local_notes(tmp_path)
     published = {"scripts/train.py", "src/lrvla/training.py", "configs/train_lora.yaml",
                  "docs/official-templates/初赛评测结果模板_JSON版.json", "docs/competition-research.md",
                  "models/Qwen3-VL-4B-Instruct/config.json"}
-    local = {"docs/commit-conventions.md", "docs/AGENTS.md", "docs/local/setup-notes.md"}
+    local = {"docs/commit-conventions.md", "docs/AGENTS.md", "docs/local/setup-notes.md",
+             "scripts/hpc/connect_ssh.py", "scripts/hpc/setup_evaluation.pbs",
+             "scripts/nscc-local.py", "configs/NSCC-local.yaml"}
     for name in required | published | local:
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)

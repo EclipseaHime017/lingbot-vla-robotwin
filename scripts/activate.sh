@@ -30,8 +30,8 @@ fi
 LRVLA_GIT_PATH="${LRVLA_GIT:-${BOOTSTRAP_GIT:-/usr/bin/git}}"
 if [[ -z "${LRVLA_GIT:-}" && -z "${BOOTSTRAP_GIT:-}" && ! -x /usr/bin/git ]]; then
     LRVLA_GIT_PATH="$(command -v git || true)"
-    if [[ -z "${LRVLA_GIT_PATH}" && -n "${PBS_JOBID:-}" ]]; then
-        # The NSCC compute image provides Git through a shared environment module.
+    if [[ -z "${LRVLA_GIT_PATH}" && -n "${BOOTSTRAP_GIT_MODULE:-}" ]]; then
+        # Load an explicitly requested module when system Git is unavailable.
         LRVLA_GIT_MODULE_STATUS=0
         if ! type module >/dev/null 2>&1; then
             if [[ -r /usr/share/Modules/init/bash ]]; then
@@ -41,7 +41,7 @@ if [[ -z "${LRVLA_GIT:-}" && -z "${BOOTSTRAP_GIT:-}" && ! -x /usr/bin/git ]]; th
             fi
         fi
         if [[ "${LRVLA_GIT_MODULE_STATUS}" == 0 ]]; then
-            module load "${BOOTSTRAP_GIT_MODULE:-git/2.39.2}" || LRVLA_GIT_MODULE_STATUS=$?
+            module load "${BOOTSTRAP_GIT_MODULE}" || LRVLA_GIT_MODULE_STATUS=$?
         fi
         if [[ "${LRVLA_GIT_MODULE_STATUS}" != 0 ]]; then
             printf 'Cannot initialize Linux Git. Set LRVLA_GIT to a Linux Git executable.\n' >&2

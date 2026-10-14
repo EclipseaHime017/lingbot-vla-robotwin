@@ -160,7 +160,7 @@ def train_distributed(config):
     if config.get("mode") != "expert" or int(config.get("expert_last_n_layers", 2)) != -1:
         raise ValueError("Distributed training currently supports the full Action Expert: mode=expert, expert_last_n_layers=-1.")
     if not torch.cuda.is_available() or torch.cuda.device_count() < world_size:
-        raise RuntimeError("The distributed entrypoint needs all PBS-assigned GPUs on one node.")
+        raise RuntimeError("The distributed entrypoint needs all requested GPUs on one node.")
     if config.get("action_chunk_tail", "mask") not in {"mask", "drop"}:
         raise ValueError("action_chunk_tail must be mask or drop.")
     if not 0 <= int(config.get("val_episodes", 5)) < 50:

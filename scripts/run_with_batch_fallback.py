@@ -16,7 +16,7 @@ import sys
 import yaml
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CUDA_OOM = re.compile(r"\bLRVLA_CUDA_OOM\b|\bCUDA(?:\s+error:)?\s+out\s+of\s+memory\b", re.IGNORECASE)
 CONTROLLED_ARGUMENTS = {"--batch-size", "--global-batch-size", "--gradient-accumulation", "--output-dir", "--config", "--resume"}
 TERMINATE_GRACE_SECONDS = 10
