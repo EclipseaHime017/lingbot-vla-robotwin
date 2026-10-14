@@ -4,6 +4,7 @@
 FP32, both settings, 50 tasks x 100 trials is the release comparison protocol.
 BF16/subsets/short trials are explicitly recorded as approximate smoke checks.
 """
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse
@@ -20,7 +21,9 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from lrvla.data import parse_tasks
-from lrvla.evaluation import INSTRUCTIONS, ROBOTWIN_REVISION, aggregate_results, create_eval_runtime, export_official_results
+from lrvla.evaluation import (
+    INSTRUCTIONS, ROBOTWIN_REVISION, aggregate_results, create_eval_runtime, evaluation_task_complete, export_official_results,
+)
 from lrvla.training_identity import base_checkpoint_identity
 from lrvla.vendor_sources import upstream_revision
 from lrvla.wsl_tools import linux_executable
@@ -38,6 +41,33 @@ def stop(process):
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
+
+
+def prepare_resumed_plan(run, plan):
+    """Reject mixing checkpoints/protocols before trusting completed scenes."""
+    existing = run / "evaluation_plan.json"
+    if not existing.is_file():
+        if any(run.glob("*/eval_logs/*.log")):
+            raise ValueError("Existing evaluation logs have no fixed-checkpoint plan; use a new output directory.")
+        return None
+    previous = json.loads(existing.read_text())
+    for key in ("checkpoint", "precision", "trials", "tasks", "settings", "inference_backend", "use_length"):
+        if previous.get(key) != plan.get(key):
+            raise ValueError(f"Evaluation resume mismatch for {key}; use the same checkpoint and protocol.")
+    if previous.get("checkpoint_identity") is None and any(run.glob("*/eval_logs/*.log")):
+        raise ValueError("Existing evaluation logs lack an attested checkpoint identity; use a new output directory.")
+    return previous.get("checkpoint_identity")
+
+
+def archive_previous_attempt(run, paths):
+    existing = [path for path in paths if path.exists()]
+    if not existing:
+        return
+    archive = run / "previous_attempts" / f"{time.time_ns()}-{os.getpid()}"
+    for path in existing:
+        destination = archive / path.relative_to(run)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        path.replace(destination)
 
 
 def main():
@@ -63,6 +93,7 @@ def main():
     parser.add_argument("--server-timeout", type=int, default=1800)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--aggregate-only", action="store_true")
+    parser.add_argument("--skip-completed", action="store_true", help="Resume this same fixed protocol, retaining completed tasks and archiving failed attempts")
     parser.add_argument("--team-id", default="replace_with_your_team_id")
     args = parser.parse_args()
     if args.smoke:
@@ -80,7 +111,7 @@ def main():
     run = run.resolve()
     run.mkdir(parents=True, exist_ok=True)
     if args.aggregate_only:
-        report = aggregate_results(run, tasks, settings, args.precision, args.trials, backend)
+        report = aggregate_results(run, tasks, settings, args.precision, args.trials, backend, use_length=args.use_length)
         export_official_results(report, run / "official_results.json", args.team_id, ROOT / "docs/official-templates/初赛评测结果模板_JSON版.json")
         print(json.dumps(report, indent=2))
         return
@@ -116,14 +147,28 @@ def main():
                        "--eval_video_log", str(args.video), "--output_dir", str(run / setting / "eval_results")]
             commands.append({"setting": setting, "task": task, "command": command})
     plan = {"checkpoint": str(checkpoint), "model_run": str(model_run), "precision": args.precision, "trials": args.trials,
+            "inference_backend": backend, "use_length": args.use_length,
             "tasks": tasks, "settings": settings, "inference_command": infer, "evaluation_commands": commands,
             "instruction_types": INSTRUCTIONS, "expert_starts_per_scene": 5, "fixed_checkpoint": True,
-            "full_protocol": len(tasks) == 50 and args.trials == 100 and len(settings) == 2 and args.precision == "fp32",
+            "full_protocol": (len(tasks) == 50 and args.trials == 100 and len(settings) == 2
+                              and args.precision == "fp32" and backend == "native" and args.use_length == 50),
             "schema": "official schema_version=1; precision and protocol recorded in sidecar"}
+    prior_identity = prepare_resumed_plan(run, plan) if args.skip_completed else None
+    if prior_identity is not None:
+        plan["checkpoint_identity"] = prior_identity
     (run / "evaluation_plan.json").write_text(json.dumps(plan, indent=2) + "\n")
     if args.dry_run:
         print(f"Dry-run plan: {run / 'evaluation_plan.json'}")
         return
+    if args.skip_completed:
+        commands = [item for item in commands if not evaluation_task_complete(run, item["setting"], item["task"], args.trials)]
+        if not commands:
+            if base_checkpoint_identity(checkpoint) != prior_identity:
+                raise ValueError("Evaluation checkpoint bytes changed after the saved completed scenes.")
+            report = aggregate_results(run, tasks, settings, args.precision, args.trials, backend, use_length=args.use_length)
+            export_official_results(report, run / "official_results.json", args.team_id, ROOT / "docs/official-templates/初赛评测结果模板_JSON版.json")
+            print(f"All requested scenes already completed: {run / 'results.json'}")
+            return
     actual_rev = upstream_revision(robotwin)
     if actual_rev != ROBOTWIN_REVISION:
         raise RuntimeError(f"RoboTwin revision mismatch: {actual_rev}")
@@ -144,9 +189,12 @@ def main():
         except OSError as error:
             raise RuntimeError(f"Inference port {args.port} is already in use") from error
     plan["checkpoint_identity"] = base_checkpoint_identity(checkpoint)
+    if prior_identity is not None and plan["checkpoint_identity"] != prior_identity:
+        raise ValueError("Evaluation checkpoint bytes changed; use a new output directory.")
     (run / "evaluation_plan.json").write_text(json.dumps(plan, indent=2) + "\n")
     server = worker = None
     try:
+        archive_previous_attempt(run, [run / "inference.log"])
         with (run / "inference.log").open("w") as log:
             server = subprocess.Popen(infer, cwd=model_run, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             deadline = time.monotonic() + args.server_timeout
@@ -163,6 +211,7 @@ def main():
             for item in commands:
                 logfile = run / item["setting"] / "eval_logs" / f"{item['task']}.log"
                 logfile.parent.mkdir(parents=True, exist_ok=True)
+                archive_previous_attempt(run, [logfile, logfile.with_suffix(".status.json")])
                 with logfile.open("w") as output:
                     worker = subprocess.Popen(item["command"], cwd=robotwin, env=sim_environment, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
                     code = worker.wait()
@@ -171,7 +220,7 @@ def main():
     finally:
         stop(worker)
         stop(server)
-        report = aggregate_results(run, tasks, settings, args.precision, args.trials, backend)
+        report = aggregate_results(run, tasks, settings, args.precision, args.trials, backend, use_length=args.use_length)
         export_official_results(report, run / "official_results.json", args.team_id, ROOT / "docs/official-templates/初赛评测结果模板_JSON版.json")
     report = json.loads((run / "results.json").read_text())
     print(f"Results: {run / 'results.json'} ({report['status']})")

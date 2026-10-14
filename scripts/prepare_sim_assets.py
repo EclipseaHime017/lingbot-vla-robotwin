@@ -10,23 +10,29 @@ import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from lrvla.data import file_sha256
+from lrvla.data import file_sha256  # noqa: E402
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robotwin", type=Path, default=ROOT / "vendor/RoboTwin")
     parser.add_argument("--archives", type=Path, default=ROOT / "data/sim_archives")
+    parser.add_argument("--files", nargs="+", choices=("embodiments.zip", "objects.zip", "background_texture.zip"),
+                        help="Prepare only selected official archives; clean scenes do not need random background textures")
     args = parser.parse_args()
     plan = json.loads((ROOT / "artifacts/download_sim.json").read_text())
     destination = (args.robotwin / "assets").resolve()
+    destination.mkdir(parents=True, exist_ok=True)
     for item in plan["sources"][0]["files"]:
+        if args.files and item["rfilename"] not in args.files:
+            continue
         archive = args.archives / item["rfilename"]
         if file_sha256(archive) != item["lfs"]["sha256"]:
             raise ValueError(f"Simulation asset archive hash mismatch: {archive}")
         with zipfile.ZipFile(archive) as bundle:
-            size = sum(member.file_size for member in bundle.infolist())
-            if shutil.disk_usage(ROOT).free < size:
+            size = sum(member.file_size for member in bundle.infolist()
+                       if not member.is_dir() and not (destination / member.filename).exists())
+            if shutil.disk_usage(destination).free < size:
                 raise RuntimeError(f"Insufficient free disk space to extract {archive.name}: {size / 1e9:.2f} GB")
             for member in bundle.infolist():
                 target = (destination / member.filename).resolve()

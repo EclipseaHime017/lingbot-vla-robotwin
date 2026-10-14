@@ -1,0 +1,25 @@
+#!/bin/bash
+# One assigned GPU, native SAPIEN/Vulkan and a real offscreen RGB camera.
+#PBS -N lrvla-render-probe
+#PBS -P personal
+#PBS -q normal
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=00:10:00
+#PBS -j oe
+#PBS -m n
+set -euo pipefail
+umask 077
+: "${PBS_JOBID:?Submit through PBS, not on a login node}"
+: "${PBS_O_WORKDIR:?PBS submission directory is missing}"
+cd "$PBS_O_WORKDIR"
+mkdir -p artifacts/pbs-evaluation
+exec >> "artifacts/pbs-evaluation/${PBS_JOBID}.log" 2>&1
+printf 'Renderer probe job %s on %s at %s\n' "$PBS_JOBID" "$(hostname)" "$(date -Is)"
+export CONDA_ROOT="${CONDA_ROOT:-${HOME}/miniconda3}"
+export PYTHONNOUSERSITE=1
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=2
+export MPLBACKEND=Agg
+ulimit -c 0
+exec "${CONDA_ROOT}/bin/python" scripts/hpc/renderer_probe.py \
+  --output "artifacts/pbs-evaluation/${PBS_JOBID}-renderer.json"

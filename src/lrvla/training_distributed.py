@@ -320,6 +320,7 @@ def train_distributed(config):
             memories = [torch.empty_like(memory) for _ in range(world_size)]
             dist.all_gather(memories, memory)
             record = {"step": step, "loss": float(totals[0] / totals[1]), "grad_norm": float(grad),
+                      "epoch": state["epoch"], "batch_offset": state["batch_offset"],
                       "valid_action_coordinates": valid_count, "lr": optimizer.param_groups[0]["lr"],
                       "step_seconds": update_seconds, "global_batch_size": global_batch,
                       "peak_gpu_gib": [float(value[0]) for value in memories],

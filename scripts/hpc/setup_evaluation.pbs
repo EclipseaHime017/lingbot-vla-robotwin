@@ -1,0 +1,79 @@
+#!/bin/bash
+# Prepare the full clean-scene simulation runtime using CPU compilation.
+#PBS -N lrvla-eval-setup
+#PBS -P personal
+#PBS -q normal
+#PBS -l select=1:ncpus=16:mem=32gb
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -m n
+set -euo pipefail
+umask 077
+: "${PBS_JOBID:?Submit through PBS, not on a login node}"
+: "${PBS_O_WORKDIR:?PBS submission directory is missing}"
+cd "$PBS_O_WORKDIR"
+mkdir -p artifacts/pbs-evaluation
+exec >> "artifacts/pbs-evaluation/${PBS_JOBID}.log" 2>&1
+printf 'Full evaluation setup %s on %s at %s\n' "$PBS_JOBID" "$(hostname)" "$(date -Is)"
+# Modules and compiler activation hooks reference optional shell variables.
+set +u
+if ! type module >/dev/null 2>&1; then
+  source /opt/cray/pe/modules/default/init/bash
+fi
+module load git/2.39.2 cuda/12.8.1 gcc/11.2.0
+set -u
+export LRVLA_GIT="$(command -v git)"
+export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
+export CXX="$(command -v g++)"
+export CC="$(command -v gcc)"
+export TORCH_CUDA_ARCH_LIST=8.0
+export MAX_JOBS=1
+export CONDA_ROOT="${CONDA_ROOT:-${HOME}/miniconda3}"
+export PYTHONNOUSERSITE=1
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=4
+ulimit -c 0
+printf 'Git=%s CUDA_HOME=%s CXX=%s\n' "$LRVLA_GIT" "$CUDA_HOME" "$CXX"
+# Resolve the whole source root to scratch, retaining regular tracked files
+# inside it so packaged source snapshots remain verifiable.
+"${CONDA_ROOT}/bin/python" scripts/hpc/prepare_simulation_layout.py \
+  --output artifacts/nscc-simulation-layout.json
+"${CONDA_ROOT}/bin/python" - <<'DOWNLOAD_ASSETS' &
+import concurrent.futures, importlib.util, json
+from pathlib import Path
+from urllib.parse import quote
+root = Path.cwd()
+spec = importlib.util.spec_from_file_location('download_assets', root / 'scripts/download_assets.py')
+download = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(download)
+plan = json.loads((root / 'artifacts/download_sim.json').read_text())
+source = plan['sources'][0]
+source['files'] = [item for item in source['files'] if item['rfilename'] in ('embodiments.zip', 'objects.zip')]
+def fetch(item):
+    url = f"https://huggingface.co/datasets/{source['repo']}/resolve/{source['revision']}/{quote(item['rfilename'])}"
+    return download.download_file(url, root / 'data/sim_archives' / item['rfilename'], item['size'], item['lfs']['sha256'])
+with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    source['downloads'] = list(pool.map(fetch, source['files']))
+plan['download_complete'] = True
+(root / 'artifacts/download_sim_clean.json').write_text(json.dumps(plan, indent=2) + '\n')
+DOWNLOAD_ASSETS
+asset_pid=$!
+/bin/bash scripts/setup_sim.sh --with-curobo
+wait "$asset_pid"
+"${CONDA_ROOT}/bin/python" scripts/prepare_sim_assets.py --files embodiments.zip objects.zip
+(
+  cd vendor/RoboTwin
+  "${CONDA_ROOT}/envs/robotwin-sim/bin/python" script/update_embodiment_config_path.py
+  "${CONDA_ROOT}/envs/robotwin-sim/bin/python" -c 'import torch, mplib, sapien; import envs._base_task; import curobo; print("Full RoboTwin imports verified", torch.__version__)'
+)
+"${CONDA_ROOT}/bin/python" - <<'READY'
+from pathlib import Path
+from datetime import datetime, timezone
+import json, os
+Path('artifacts/nscc-evaluation-environment-ready.json').write_text(json.dumps({
+    'ok': True, 'job_id': os.environ['PBS_JOBID'],
+    'generated_at': datetime.now(timezone.utc).isoformat(),
+    'setting': 'demo_clean', 'cuda_architecture': '8.0',
+    'gpu_rendering_tested': False, 'assets': ['embodiments.zip', 'objects.zip'],
+}, indent=2) + '\n')
+READY

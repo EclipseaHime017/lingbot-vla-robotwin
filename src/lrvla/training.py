@@ -19,7 +19,7 @@ from .training_checkpoint import export_hf_checkpoint, resume_training_checkpoin
 from .training_data import build_clean_datasets, epoch_dataloader, model_collate
 from .training_models import configure_trainable, flow_matching_bc, memory_report, normalize_bc_gradients
 from .training_identity import base_checkpoint_identity, manifest_content_sha256
-from .training_runtime import add_vendor_path, build_policy, enable_action_checkpointing
+from .training_runtime import build_policy, enable_action_checkpointing
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

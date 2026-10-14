@@ -76,6 +76,23 @@ def test_epoch_end_padding_keeps_collectives_balanced_and_resume_exact():
         assert replay == full[rank][1:]
 
 
+def test_resumed_run_finishes_all_training_samples_before_the_next_epoch():
+    length, per_rank, world, consumed_batches = 1017, 4, 4, 10
+    order = torch.randperm(length, generator=torch.Generator().manual_seed(42)).tolist()
+    complete = [list(DistributedEpochBatchSampler(length, per_rank, 42, rank=rank, world_size=world))
+                for rank in range(world)]
+    suffix = [list(DistributedEpochBatchSampler(length, per_rank, 42, rank=rank, world_size=world,
+                                              offset=consumed_batches)) for rank in range(world)]
+    observed = []
+    for batches, start in ((complete, 0), (suffix, consumed_batches)):
+        limit = consumed_batches if start == 0 else len(suffix[0])
+        for step in range(limit):
+            observed.extend(index for rank in range(world) for index in batches[rank][step])
+    assert observed[:length] == order
+    assert set(observed) == set(range(length))
+    assert len(observed) == 1024
+
+
 @pytest.mark.parametrize("world", [4, 8])
 def test_rank_average_with_unequal_masks_matches_a_single_global_adam_update(world):
     torch.manual_seed(22)

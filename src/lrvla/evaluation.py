@@ -104,16 +104,32 @@ def create_eval_runtime(vendor: Path, robotwin: Path, destination: Path, trials:
     return client
 
 
-def aggregate_results(run: Path, tasks: list[str], settings: list[str], precision: str, trials: int = 100, inference_backend: str = "native") -> dict:
+def evaluation_task_complete(run: Path, setting: str, task: str, trials: int) -> bool:
+    """Only a successful client exit with all requested scenes is reusable."""
+    logfile = Path(run) / setting / "eval_logs" / f"{task}.log"
+    status_file = logfile.with_suffix(".status.json")
+    if not logfile.is_file() or not status_file.is_file():
+        return False
+    try:
+        _, total = parse_success_counts(logfile.read_text(errors="replace"))
+        status = json.loads(status_file.read_text())
+    except (ValueError, OSError):
+        return False
+    return total == trials and status.get("exit_code") == 0
+
+
+def aggregate_results(run: Path, tasks: list[str], settings: list[str], precision: str, trials: int = 100,
+                      inference_backend: str = "native", task_runs: dict[str, Path] | None = None,
+                      use_length: int = 50) -> dict:
     result = {"schema": "lrvla-evaluation-v1", "official_submission_template_verified": True,
               "precision": precision, "release_fp32_precision": precision == "fp32",
               "inference_backend": inference_backend, "release_kernel_equivalence_verified": inference_backend == "native",
-              "robotwin_revision": ROBOTWIN_REVISION, "trials_per_task": trials, "settings": {},
+              "robotwin_revision": ROBOTWIN_REVISION, "trials_per_task": trials, "use_length": use_length, "settings": {},
               "full_50_task_benchmark": set(tasks) == set(TASKS) and len(tasks) == 50 and trials == 100 and set(settings) == set(INSTRUCTIONS)}
     for setting in settings:
         rows = []
         for task in tasks:
-            logfile = run / setting / "eval_logs" / f"{task}.log"
+            logfile = (Path(task_runs[task]) if task_runs is not None else run) / setting / "eval_logs" / f"{task}.log"
             success, total = parse_success_counts(logfile.read_text(errors="replace")) if logfile.exists() else (0, 0)
             status_file = logfile.with_suffix(".status.json")
             status = json.loads(status_file.read_text()) if status_file.exists() else {}
@@ -129,7 +145,8 @@ def aggregate_results(run: Path, tasks: list[str], settings: list[str], precisio
                                        "observed_success_rate": successes / total if total else None,
                                        "complete": complete, "benchmark_success_rate": successes / total if complete and total else None}
     result["complete"] = all(setting["complete"] for setting in result["settings"].values())
-    result["comparable_to_release"] = result["complete"] and result["full_50_task_benchmark"] and precision == "fp32" and inference_backend == "native"
+    result["comparable_to_release"] = (result["complete"] and result["full_50_task_benchmark"]
+                                       and precision == "fp32" and inference_backend == "native" and use_length == 50)
     result["status"] = "completed" if result["complete"] else "incomplete"
     (run / "results.json").write_text(json.dumps(result, indent=2) + "\n")
     return result

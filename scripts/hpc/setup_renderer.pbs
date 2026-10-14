@@ -1,0 +1,31 @@
+#!/bin/bash
+# Install only the native renderer dependencies before preparing large assets.
+#PBS -N lrvla-render-setup
+#PBS -P personal
+#PBS -q normal
+#PBS -l select=1:ncpus=4:mem=16gb
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -m n
+set -euo pipefail
+umask 077
+: "${PBS_JOBID:?Submit through PBS, not on a login node}"
+: "${PBS_O_WORKDIR:?PBS submission directory is missing}"
+cd "$PBS_O_WORKDIR"
+mkdir -p artifacts/pbs-evaluation .cache/conda .cache/pip
+exec >> "artifacts/pbs-evaluation/${PBS_JOBID}.log" 2>&1
+printf 'Renderer setup job %s on %s at %s\n' "$PBS_JOBID" "$(hostname)" "$(date -Is)"
+export CONDA_ROOT="${CONDA_ROOT:-${HOME}/miniconda3}"
+export CONDA_PKGS_DIRS="$PWD/.cache/conda"
+export PIP_CACHE_DIR="$PWD/.cache/pip"
+export PYTHONNOUSERSITE=1
+export PYTHONUNBUFFERED=1
+sim_prefix="${CONDA_ROOT}/envs/robotwin-sim"
+if [[ ! -x "${sim_prefix}/bin/python" ]]; then
+  "${CONDA_ROOT}/bin/conda" create -p "$sim_prefix" -y --override-channels -c conda-forge python=3.10 pip
+fi
+"${sim_prefix}/bin/python" -m pip install \
+  numpy==1.26.4 sapien==3.0.0b1 opencv-python==4.11.0.86 \
+  setuptools==69.5.1 pillow==11.3.0
+"${sim_prefix}/bin/python" -m pip check
+"${sim_prefix}/bin/python" -c 'import numpy, sapien; print("Native renderer dependencies installed", numpy.__version__, sapien.__version__)'

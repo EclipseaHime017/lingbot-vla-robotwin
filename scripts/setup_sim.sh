@@ -6,9 +6,11 @@ conda_root="${CONDA_ROOT:-${HOME}/miniconda3}"
 conda_bin="${conda_root}/bin/conda"
 sim_prefix="${conda_root}/envs/robotwin-sim"
 sim_python="${sim_prefix}/bin/python"
+sim_git="${LRVLA_GIT:-${BOOTSTRAP_GIT:-/usr/bin/git}}"
+sim_bootstrap_python="${BOOTSTRAP_PYTHON:-${conda_root}/bin/python}"
 # Use Linux executables directly while preserving the user's environment.
-/usr/bin/python3 "${project_root}/scripts/check_wsl_tools.py" \
-  "conda=${conda_bin}" git=/usr/bin/git bash=/bin/bash >/dev/null
+"${sim_bootstrap_python}" "${project_root}/scripts/check_wsl_tools.py" \
+  "conda=${conda_bin}" "git=${sim_git}" bash=/bin/bash >/dev/null
 with_curobo=false
 skip_torch=false
 for arg in "$@"; do
@@ -39,10 +41,10 @@ if [[ ! -x "$sim_python" ]]; then
   "$conda_bin" create -p "$sim_prefix" -y --override-channels -c conda-forge python=3.10 pip 'ffmpeg<8'
 fi
 # toppra 0.6.3 is source-only on PyPI, so even the basic sim needs a compiler.
-if [[ ! -x /usr/bin/g++ && ! -x "${sim_prefix}/bin/x86_64-conda-linux-gnu-c++" ]]; then
+if [[ ! -x "${CXX:-/usr/bin/g++}" && ! -x "${sim_prefix}/bin/x86_64-conda-linux-gnu-c++" ]]; then
   "$conda_bin" install -p "$sim_prefix" -y --override-channels -c conda-forge 'gxx_linux-64=12'
 fi
-if "$with_curobo" && [[ ! -x "${sim_prefix}/bin/nvcc" ]]; then
+if "$with_curobo" && [[ ! -x "${CUDA_HOME:-${sim_prefix}}/bin/nvcc" ]]; then
   "$conda_bin" install -p "$sim_prefix" -y --override-channels -c nvidia -c conda-forge \
     'cuda-nvcc=12.8' 'cuda-cudart-dev=12.8' 'cuda-cccl=12.8' 'ninja=1.13'
 fi
@@ -139,9 +141,9 @@ if "$with_curobo"; then
   export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-$("$sim_python" -c 'import torch; c=torch.cuda.get_device_capability(); print(f"{c[0]}.{c[1]}")')}"
   curobo_dir="${project_root}/vendor/RoboTwin/envs/curobo"
   if [[ ! -d "$curobo_dir/.git" ]]; then
-    /usr/bin/git clone --branch v0.7.8 --depth 1 https://github.com/NVlabs/curobo.git "$curobo_dir"
+    "$sim_git" clone --branch v0.7.8 --depth 1 https://github.com/NVlabs/curobo.git "$curobo_dir"
   fi
-  [[ "$(/usr/bin/git -C "$curobo_dir" describe --tags --exact-match)" == v0.7.8 ]] || {
+  [[ "$("$sim_git" -C "$curobo_dir" describe --tags --exact-match)" == v0.7.8 ]] || {
     printf 'Existing CuRobo checkout is not v0.7.8.\n' >&2; exit 1;
   }
   "$sim_python" -m pip install warp-lang==1.12.0 yourdfpy==0.0.58 usd-core==24.11 lxml==5.4.0 \

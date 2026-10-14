@@ -1,0 +1,41 @@
+#!/bin/bash
+# Recover an interrupted copy without replacing the active source until verified.
+#PBS -N lrvla-sim-layout
+#PBS -P personal
+#PBS -q normal
+#PBS -l select=1:ncpus=4:mem=16gb
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -m n
+set -euo pipefail
+umask 077
+: "${PBS_JOBID:?Submit through PBS, not on a login node}"
+: "${PBS_O_WORKDIR:?PBS submission directory is missing}"
+cd "$PBS_O_WORKDIR"
+mkdir -p artifacts/pbs-evaluation
+exec >> "artifacts/pbs-evaluation/${PBS_JOBID}.log" 2>&1
+export CONDA_ROOT="${CONDA_ROOT:-${HOME}/miniconda3}"
+export PYTHONUNBUFFERED=1
+set +u
+if ! type module >/dev/null 2>&1; then
+  source /opt/cray/pe/modules/default/init/bash
+fi
+module load git/2.39.2
+set -u
+export LRVLA_GIT="$(command -v git)"
+"${CONDA_ROOT}/bin/python" - <<'PREPARE_LAYOUT'
+from pathlib import Path
+import hashlib, json, os, subprocess
+from scripts.hpc.prepare_simulation_layout import prepare
+root = Path.cwd()
+repo = root / 'vendor/RoboTwin'
+files = subprocess.check_output([os.environ['LRVLA_GIT'], '-C', str(repo), 'ls-files', '-z', '--', 'assets']).decode().split('\0')
+before = {path: hashlib.sha256((repo / path).read_bytes()).hexdigest() for path in files if path}
+(root / 'artifacts/nscc-simulation-layout-before.json').write_text(json.dumps(before, indent=2) + '\n')
+report = prepare(root, resume_copy=True)
+after = {path: hashlib.sha256((repo / path).read_bytes()).hexdigest() for path in before}
+assert before == after, (before, after)
+report['tracked_asset_sha256'] = after
+(root / 'artifacts/nscc-simulation-layout.json').write_text(json.dumps(report, indent=2) + '\n')
+print(json.dumps(report, indent=2))
+PREPARE_LAYOUT

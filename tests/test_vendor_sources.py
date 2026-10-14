@@ -70,6 +70,29 @@ def test_symlink_cannot_read_outside_source_tree(tmp_path):
         verify_snapshot(repository, REVISION)
 
 
+def test_top_level_repository_symlink_can_resolve_to_scratch(tmp_path):
+    repository, metadata = snapshot(tmp_path)
+    vendor = tmp_path / "project/vendor"
+    vendor.mkdir(parents=True)
+    alias = vendor / "RoboTwin"
+    alias.symlink_to(repository, target_is_directory=True)
+    assert verify_snapshot(alias, REVISION) == metadata
+    assert upstream_revision(alias) == REVISION
+
+
+def test_internal_asset_directory_symlink_is_rejected_even_within_repository(tmp_path):
+    repository, metadata = snapshot(tmp_path)
+    assets = repository / "regular-assets"
+    assets.mkdir()
+    content = b"pinned asset source\n"
+    (assets / "_download.py").write_bytes(content)
+    (repository / "assets").symlink_to(assets, target_is_directory=True)
+    metadata["files"]["assets/_download.py"] = hashlib.sha256(content).hexdigest()
+    (repository / SNAPSHOT_NAME).write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        verify_snapshot(repository, REVISION)
+
+
 def test_git_snapshot_tracks_sources_and_survives_copy_without_git(tmp_path):
     repository = tmp_path / "git-source"
     repository.mkdir()

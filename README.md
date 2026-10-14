@@ -266,7 +266,7 @@ bash train.sh --config configs/train_expert.yaml \
 bash train.sh --config configs/train_expert.yaml --device cpu --dry-run
 ```
 
-`--dry-run` 需要已安装的源码与 Qwen 配置资源，其显存下界不包含激活、KV cache 和临时工作区。全部 Action Expert 的 FP32 梯度及 AdamW 状态需求较大，当前预设面向本地部分层微调；训练入口会在权重和优化器状态下界超过可用显存时拒绝启动。当前入口为单 GPU，未实现 DDP/FSDP 训练。
+`--dry-run` 需要已安装的源码与 Qwen 配置资源，其显存下界不包含激活、KV cache 和临时工作区。全部 Action Expert 的 FP32 梯度及 AdamW 状态需求较大，当前预设面向本地部分层微调；训练入口会在权重和优化器状态下界超过可用显存时拒绝启动。单 GPU 可训练部分 Expert；全部 Expert 的多卡 FSDP 配置与启动方式见 3.7。
 
 ### 3.4 保存、恢复与导出
 
@@ -321,7 +321,7 @@ python scripts/open_loop.py \
 
 ```bash
 bash eval.sh --checkpoint runs/lora-one-step/checkpoints/global_step_1/hf_ckpt \
-  --tasks adjust_bottle --setting clean --trials 2 --precision bf16 \
+  --tasks adjust_bottle --setting demo_clean --trials 2 --precision bf16 \
   --use-length 10
 ```
 
@@ -388,3 +388,26 @@ python scripts/hpc/submit_pbs.py \
 自动方案先使用真实全局 batch 64（每卡 16）。只有发生明确的 CUDA 显存不足时，启动器才终止本次训练的全部 rank，并从基模重新开始全局 batch 32（每卡 8），仍不累积。两个尝试分别写入 `batch64/` 和 `batch32/`，尝试记录位于 `attempts.json`；较小 batch 完成 1000 次更新时消费约 32000 个样本。非显存错误不会自动降低 batch，两种 batch 都显存不足时作业失败并保留日志。增加 batch 后的实际显存与吞吐以正式训练日志为准。
 
 完整 Expert 的每次分片 checkpoint 总计约 20 GiB，应将 `runs/` 放在足够大的存储中。多卡 checkpoint 是包含 `shards/`、每 rank 随机状态及 `complete.json` 的目录；`latest_checkpoint.txt` 指向此目录。使用 `--resume <目录>` 恢复，要求相同 GPU 数和数据采样配置。训练结束后只由 rank 0 导出完整、可独立推理的 `hf_ckpt`，其中包含冻结 backbone 和训练后的 Expert。日志记录每张卡的实际分配／保留显存峰值、更新耗时及 checkpoint 耗时。
+
+采样器在每个 epoch 中先全局随机排列所有训练帧，再分配给各 GPU，消费完当前排列后才进入下一轮。以 494328 个训练帧、全局 batch 64 为例，一轮需要 7724 次更新，末尾仅补齐 8 个重复帧；从基模训练 10000 次更新会完成全部训练样本的首轮遍历。日志的 `epoch` 和 `batch_offset` 可用于核对遍历进度。训练规模直接修改现有 `configs/train_expert_full.yaml` 的 `max_steps`，或用 `--max-steps` 覆盖。
+
+### 3.8 多任务闭环 PBS 评测
+
+仿真环境和两种场景资产准备完成后，可对同一导出模型执行 50 个任务、每任务 clean 和 randomized 各 100 个场景的评测。默认每 5 个任务组成一个单卡作业，共 10 个分片；每个分片使用原生 FP32 推理、一次加载模型，每次生成并执行 50 条动作。
+
+```bash
+python scripts/hpc/submit_eval_pbs.py \
+  --project personal --workdir "$PWD" --conda-root "$CONDA_ROOT" \
+  --checkpoint "$PWD/runs/expert_full_clean/checkpoints/global_step_10000/hf_ckpt" \
+  --run-dir "$PWD/runs/evaluation/expert-full" \
+  --tasks all --tasks-per-shard 5 --walltime 24:00:00
+```
+
+命令默认只生成脚本，保存在本次 `--run-dir` 下的 `pbs/`，不同评测运行使用独立目录；添加 `--submit` 提交分片及其聚合作业。可用 `--dependency afterok:<资产准备作业ID>` 等待仿真资产完成。任务作业申请 1 GPU、16 CPU、110GB 内存，长作业进入普通单卡池；分片数不代表同时运行数量，实际并发由队列限制决定。
+
+同一分片脚本重新执行时会跳过已完成全部场景的任务，校验模型权重和评测协议一致，归档失败日志。聚合后输出 `results.json`，其中按环境和任务记录成功次数与场景总数；尚未完成的任务保留为不完整结果。也可手动刷新聚合：
+
+```bash
+python scripts/hpc/aggregate_eval_shards.py \
+  --workflow runs/evaluation/expert-full/evaluation_workflow.json
+```
