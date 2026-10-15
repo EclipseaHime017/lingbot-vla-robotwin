@@ -5,7 +5,6 @@ import pytest
 import torch
 from torch import nn
 
-from lrvla.training import validate
 from lrvla.training_checkpoint import resume_training_checkpoint, save_training_checkpoint
 from lrvla.training_models import masked_bc_loss, normalize_bc_gradients
 
@@ -54,19 +53,6 @@ def test_masked_accumulation_matches_one_large_batch_gradient_and_adam_update(lo
 def test_normalization_rejects_invalid_coordinate_count(count):
     with pytest.raises(ValueError, match="valid action count"):
         normalize_bc_gradients(nn.Linear(1, 1).parameters(), count)
-
-
-def test_validation_uses_coordinate_weighted_mean_and_preserves_random_state():
-    model = nn.Linear(1, 1)
-    batches = [{"joint_mask": torch.ones(1, 1, 2, dtype=torch.bool)},
-               {"joint_mask": torch.ones(1, 4, 2, dtype=torch.bool)}]
-    def loss_fn(model, batch):
-        torch.randn(3)
-        return torch.tensor(2.0 if batch["joint_mask"].shape[1] == 1 else 6.0)
-    saved_rng = torch.get_rng_state().clone()
-    assert validate(model, batches, "cpu", loss_fn=loss_fn) == pytest.approx(5.2)
-    torch.testing.assert_close(torch.get_rng_state(), saved_rng, rtol=0, atol=0)
-    assert model.training
 
 
 @pytest.mark.parametrize("change", ["tail", "loss", "legacy"])

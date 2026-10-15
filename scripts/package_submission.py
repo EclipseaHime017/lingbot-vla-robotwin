@@ -72,6 +72,9 @@ def validate_evaluation_binding(results_path: Path, checkpoint: Path) -> dict:
         raise ValueError("Evaluation must attest one fixed checkpoint's actual shard bytes")
     if plan.get("precision") != detail.get("precision"):
         raise ValueError("Evaluation precision differs between the plan and results")
+    for key in ("inference_backend", "use_length", "num_steps", "compile", "action_smoothing", "expert_seed_policy"):
+        if plan.get(key) != detail.get(key):
+            raise ValueError(f"Evaluation {key} differs between the plan and results")
     actual = json.loads(results_path.read_text())["results"]
     expected = {setting: {task: {"attempts": 0, "successes": 0} for task in rows}
                 for setting, rows in actual.items()}
@@ -89,6 +92,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results", type=Path, required=True, help="Measured results matching the supplied official JSON")
     parser.add_argument("--run", type=Path, required=True, help="Trained run containing metadata/configs/checkpoints")
+    parser.add_argument("--checkpoint", type=Path, help="Select one exported checkpoint when the run has multiple exports")
     parser.add_argument("--report", type=Path, required=True, help="Completed reproduction report using the supplied template")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--no-vendor", action="store_true", help="Reclone pinned upstream sources using setup scripts")
@@ -100,10 +104,11 @@ def main():
     metadata = json.loads((run / "run_metadata.json").read_text())
     if metadata.get("competition_all_50_tasks") is not True or metadata.get("training_method") != "clean_only_behavior_cloning":
         parser.error("Submission requires one jointly trained 50-task clean-only BC model; subset smoke runs are incomplete")
-    checkpoints = list(run.glob("checkpoints/global_step_*/hf_ckpt/export.json"))
-    if len(checkpoints) != 1:
-        parser.error("Select a run containing exactly one merged exported checkpoint")
-    validate_evaluation_binding(args.results, checkpoints[0].parent)
+    checkpoints = [path.parent.resolve() for path in run.glob("checkpoints/global_step_*/hf_ckpt*/export.json")]
+    checkpoint = args.checkpoint.resolve() if args.checkpoint else (checkpoints[0] if len(checkpoints) == 1 else None)
+    if checkpoint not in checkpoints:
+        parser.error("Select exactly one merged export using --checkpoint, including hf_ckpt_float32 if desired")
+    validate_evaluation_binding(args.results, checkpoint)
     if not args.report.is_file() or not args.report.read_text().strip():
         parser.error("--report must be a completed reproduction report")
     if args.output.exists():
@@ -132,6 +137,8 @@ def main():
                     archive.writestr("02_代码材料/vendor/" + repo + "/.lrvla_snapshot.json",
                                      json.dumps(snapshot, indent=2))
             for path in sorted(run.rglob("*")):
+                if path.relative_to(run).parts[0] == "checkpoints" and not path.is_relative_to(checkpoint):
+                    continue
                 if path.is_file() and path.suffix in {".safetensors", ".json", ".yaml", ".yml", ".txt"}:
                     archive.write(path, "03_模型材料/run/" + path.relative_to(run).as_posix())
         temporary.replace(args.output)

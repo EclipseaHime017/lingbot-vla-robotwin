@@ -1,0 +1,7 @@
+# Reproducible baseline; these values have not been tuned for best success rate.
+backend: native
+precision: fp32
+use_length: 50
+num_steps: 10
+compile: false
+action_smoothing: none

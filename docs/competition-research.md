@@ -1,4 +1,4 @@
-# Competition requirements verified on 2026-10-01
+# Competition requirements verified on 2026-10-15
 
 ## Authoritative competition scope
 
@@ -23,12 +23,18 @@ Sources: [competition information](https://tianchi.aliyun.com/competition/entran
 
 ## Training and inference boundaries
 
-The official rule explainer explicitly requires **behavior cloning** from clean
-demonstrations. **Both online and offline RL are prohibited**, including learned
-value/advantage weighting, reward construction and bootstrapping. Additional
-simulator rollouts, rendered observations, external data, generated language,
-unseen instructions, HER and official RoboTwin checkpoint distillation are also
-prohibited.
+The current rule explainer §3.4 permits offline RL (including IQL, CQL, AWAC and
+advantage-weighted BC) only when all five criteria hold: zero simulator calls
+throughout training/labeling/filtering/model selection; supervision traceable to
+released records with an explicitly disclosed state-based reward; no splitting,
+pseudo-target relabeling or recombination of records/instructions; eligible VLA
+and teacher initialization; and no external data/models beyond the specified
+frozen generic perception-teacher exception. Online environment interaction,
+additional rendered observations, generated language, unseen instructions, HER
+and official RoboTwin checkpoint distillation remain prohibited. This repository
+continues to implement clean-only flow-matching BC; it does not implement RL.
+Teacher eligibility must be read together with §2.3's distillation provisions;
+the broad introductory BC wording should not override §3.4's explicit clarification.
 
 Allowed approaches include LoRA/expert/full supervised adaptation, visual/state
 noise, demonstration-statistic filtering or weighting, replacement within the
@@ -39,13 +45,14 @@ full checkpoint, with implementation documented.
 Final inference uses **one jointly trained weight set**. Task/instruction-based
 deterministic routing, multiple checkpoint ensembles, multi-seed voting and
 failure-triggered episode resets are prohibited. Within one model, documented
-chunk-length changes, replanning, smoothing, precision changes, temporal output
-averaging and confidence gating using its own outputs are permitted.
+chunk-length changes, replanning, smoothing and precision changes are permitted.
+Under §2.4, temporal ensemble/output averaging and confidence gating are **not
+explicitly permitted until written organizer confirmation is obtained**.
 
 RoboTwin `check_success()` defines success. Official reevaluation uses the
 submitted `eval.sh` inference settings.
 
-Source: [official rule explainer](https://tianchi.aliyun.com/forum/post/1081761).
+Source: [official rule explainer API, §2.3/2.4/3.3/3.4](https://tianchi.aliyun.com/forum/api/forum/post/details?postId=1081761&seo=false).
 
 ## Evaluation details from the official Q&A
 

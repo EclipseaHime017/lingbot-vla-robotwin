@@ -23,8 +23,8 @@ class BCForward(nn.Module):
         super().__init__()
         self.policy = policy
 
-    def forward(self, batch, *, reduction="mean"):
-        return flow_matching_bc(self.policy, batch, reduction=reduction)
+    def forward(self, batch, *, reduction="mean", **kwargs):
+        return flow_matching_bc(self.policy, batch, reduction=reduction, **kwargs)
 
 
 def fsdp_parameter_groups(policy):

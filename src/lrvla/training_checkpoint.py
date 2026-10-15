@@ -11,6 +11,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from .training_models import LoRALinear
+from .training_identity import base_checkpoint_identity
 
 
 def run_relative_path(run, value):
@@ -95,8 +96,100 @@ def merged_state_items(model, dtype=torch.bfloat16):
         yield name, value.contiguous()
 
 
+def base_inventory(checkpoint):
+    inventory = {}
+    for path in sorted(Path(checkpoint).glob("*.safetensors")):
+        with safe_open(path, framework="pt", device="cpu") as reader:
+            for name in reader.keys():
+                if name in inventory:
+                    raise ValueError(f"Duplicate base tensor: {name}")
+                view = reader.get_slice(name)
+                inventory[name] = (path, tuple(view.get_shape()), view.get_dtype())
+    if not inventory:
+        raise FileNotFoundError(f"No base safetensors in {checkpoint}")
+    return inventory
+
+
+def restore_trainable_base(model, checkpoint):
+    """Initialize FP32 masters from original base, before optimizer/resume.
+
+    Frozen weights keep their memory-saving BF16 training representation. New
+    LoRA matrices retain their initialized values; their frozen base is restored
+    from the original checkpoint only when exporting.
+    """
+    parameters = {name: p for name, p in model.named_parameters() if p.requires_grad}
+    inventory = base_inventory(checkpoint)
+    with torch.no_grad():
+        for name, parameter in parameters.items():
+            if name.endswith((".lora_A", ".lora_B")):
+                continue
+            if name not in inventory or inventory[name][1] != tuple(parameter.shape):
+                raise ValueError(f"Trainable parameter missing or mismatched in base: {name}")
+            with safe_open(inventory[name][0], framework="pt", device="cpu") as reader:
+                parameter.copy_(reader.get_tensor(name).float())
+
+
+def overlay_base_state_items(checkpoint, trainable_state, selection, *, expected_base_identity):
+    """Original frozen tensors plus FP32 masters; never upcast a rounded base."""
+    if base_checkpoint_identity(checkpoint) != expected_base_identity:
+        raise ValueError("Export base_identity differs from the training checkpoint.")
+    inventory = base_inventory(checkpoint)
+    if set(trainable_state) != set(selection["trainable_names"]):
+        raise ValueError("Export trainable parameter keys differ from the saved selection.")
+    adapters = set(selection.get("lora_modules", []))
+    rank = (selection.get("lora") or {}).get("rank", 0)
+    alpha = (selection.get("lora") or {}).get("alpha", 0)
+    for name, value in trainable_state.items():
+        if value.dtype != torch.float32:
+            raise ValueError(f"Export requires FP32 master weights: {name} is {value.dtype}")
+        parent, _, leaf = name.rpartition(".")
+        if parent in adapters and leaf in {"lora_A", "lora_B"}:
+            if rank <= 0 or f"{parent}.weight" not in inventory:
+                raise ValueError(f"Invalid LoRA base/rank: {parent}")
+            shape = inventory[f"{parent}.weight"][1]
+            expected = (rank, shape[1]) if leaf == "lora_A" else (shape[0], rank)
+        else:
+            if name not in inventory:
+                raise ValueError(f"Trainable key absent from original base: {name}")
+            expected = inventory[name][1]
+        if tuple(value.shape) != expected:
+            raise ValueError(f"Export shape mismatch: {name}")
+    for parent in adapters:
+        if not {f"{parent}.lora_A", f"{parent}.lora_B"} <= trainable_state.keys():
+            raise ValueError(f"Incomplete LoRA pair: {parent}")
+    for name, (_, _, source_dtype) in inventory.items():
+        if name not in trainable_state and source_dtype in {"BF16", "F16", "F64"}:
+            raise ValueError(f"Original frozen base must contain F32 weights: {name} is {source_dtype}")
+    # Validate before returning the iterator, so invalid inputs create no export.
+    def items():
+        for name, (path, _, source_dtype) in inventory.items():
+            if name in trainable_state:
+                value = trainable_state[name].detach().cpu()
+            else:
+                with safe_open(path, framework="pt", device="cpu") as reader:
+                    value = reader.get_tensor(name)
+                if value.is_floating_point() and source_dtype != "F32":
+                    raise ValueError(f"Original frozen base must contain F32 weights: {name} is {source_dtype}")
+                parent, _, leaf = name.rpartition(".")
+                if parent in adapters and leaf == "weight":
+                    with torch.autocast("cpu", enabled=False):
+                        value = value.float() + (trainable_state[f"{parent}.lora_B"].detach().float().cpu() @
+                                                 trainable_state[f"{parent}.lora_A"].detach().float().cpu()) * (alpha / rank)
+            yield name, value.contiguous()
+    return items()
+
+
 def export_hf_checkpoint(model, output, *, dtype=torch.bfloat16, max_shard_bytes=512 * 2**20, processor=None,
-                         state_items=None):
+                         state_items=None, base_checkpoint=None, expected_base_identity=None, selection=None):
+    provenance = {}
+    if base_checkpoint is not None:
+        if state_items is not None:
+            raise ValueError("Specify base overlay or state_items, not both.")
+        masters = {name: p.detach().cpu() for name, p in model.named_parameters() if p.requires_grad}
+        state_items = overlay_base_state_items(base_checkpoint, masters, selection,
+                                              expected_base_identity=expected_base_identity)
+        provenance = {"frozen_source": "original_base", "trainable_source": "fp32_master",
+                      "base_identity": expected_base_identity}
     output = Path(output)
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f"Refusing to mix an export with existing files: {output}")
@@ -130,6 +223,10 @@ def export_hf_checkpoint(model, output, *, dtype=torch.bfloat16, max_shard_bytes
     (output / "model.safetensors.index.json").write_text(json.dumps({"metadata": {"total_size": total}, "weight_map": index}, indent=2))
     if hasattr(model.config, "to_json_file"):
         model.config.to_json_file(str(output / "config.json"))
+        config_path = output / "config.json"
+        saved_config = json.loads(config_path.read_text())
+        saved_config["torch_dtype"] = str(dtype).split(".")[-1]
+        config_path.write_text(json.dumps(saved_config, indent=2) + "\n")
     if processor is not None:
         processor.save_pretrained(output)
     model_type = getattr(model.config, "model_type", "")
@@ -137,7 +234,7 @@ def export_hf_checkpoint(model, output, *, dtype=torch.bfloat16, max_shard_bytes
     adapter_count = sum(isinstance(module, LoRALinear) for module in model.modules())
     (output / "export.json").write_text(json.dumps({"format": export_format, "merged_lora": bool(adapter_count),
                                                    "lora_modules": adapter_count, "dtype": str(dtype),
-                                                   "tensors": len(index), "shards": len(shards)}, indent=2))
+                                                   "tensors": len(index), "shards": len(shards), **provenance}, indent=2))
     return output
 
 
@@ -165,7 +262,7 @@ def resume_training_checkpoint(model, optimizer, scheduler, checkpoint, *, expec
     for key in ("base_identity", "manifest_content_sha256", "selection", "norm_sha256", "model_geometry", "qwen_config_sha256"):
         if payload["metadata"].get(key) != expected_metadata.get(key):
             raise ValueError(f"Resume mismatch for {key}; use identical frozen base content, audited clean data and trainable selection.")
-    for key in ("loss_normalization", "data_sampling"):
+    for key in ("loss_normalization", "moe_loss", "data_sampling"):
         if payload["metadata"].get(key) != expected_metadata.get(key):
             raise ValueError(f"Resume mismatch for {key}; use the same loss normalization and data sampling. "
                              "Checkpoints predating the tail/normalization fix cannot provide an exact resume.")

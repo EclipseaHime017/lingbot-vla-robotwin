@@ -22,6 +22,12 @@ chunk_size: 50
 action_chunk_tail: mask
 img_size: 256
 image_augment: false
+# Optional: same-episode seen instructions; create the audited sidecar first.
+resample_seen_instructions: false
+seen_instructions: data/clean_seen_instructions.json
+# Official per-sequence MoE losses (also propagate through LoRA hidden states).
+sequence_wise_loss_coeff: 0.001
+router_z_loss_coeff: 0.0001
 num_workers: 0
 val_episodes: 5
 seed: 42
@@ -31,7 +37,7 @@ max_grad_norm: 1.0
 warmup_steps: 100
 max_steps: 1000
 eval_every: 100
-eval_batches: 8
+validation_frames_per_episode: 1
 save_every: 100
 export: true
-export_dtype: bfloat16
+export_dtype: float32

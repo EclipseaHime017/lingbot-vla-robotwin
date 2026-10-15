@@ -12,14 +12,17 @@ import shutil
 import time
 
 import torch
-from torch.utils.data import DataLoader
 import yaml
 
-from .training_checkpoint import export_hf_checkpoint, resume_training_checkpoint, save_training_checkpoint
-from .training_data import build_clean_datasets, epoch_dataloader, model_collate
-from .training_models import configure_trainable, flow_matching_bc, memory_report, normalize_bc_gradients
+from .training_checkpoint import export_hf_checkpoint, resume_training_checkpoint, restore_trainable_base, save_training_checkpoint
+from .training_data import build_clean_datasets, epoch_dataloader
+from .training_models import (
+    configure_moe_loss, configure_trainable, flow_matching_bc, memory_report, normalize_bc_gradients, router_load_metrics,
+)
 from .training_identity import base_checkpoint_identity, manifest_content_sha256
+from .training_instructions import load_seen_pool, sampling_identity
 from .training_runtime import build_policy, enable_action_checkpointing
+from .training_validation import validate_stratified, validation_identity, validation_samples
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -39,25 +42,6 @@ def schedule_multiplier(step, max_steps, warmup, minimum=0.1):
         return max(1, step + 1) / warmup
     progress = min(1, max(0, (step - warmup) / max(1, max_steps - warmup)))
     return minimum + (1 - minimum) * 0.5 * (1 + math.cos(math.pi * progress))
-
-
-def validate(model, loader, device, max_batches=8, loss_fn=flow_matching_bc):
-    model.eval()
-    numerator, valid_count = 0.0, 0.0
-    gpu_ids = [torch.device(device).index or 0] if str(device).startswith("cuda") else []
-    with torch.random.fork_rng(devices=gpu_ids), torch.no_grad():
-        torch.manual_seed(12345)
-        for idx, batch in enumerate(loader):
-            if idx >= max_batches:
-                break
-            with torch.autocast(device_type=torch.device(device).type, dtype=torch.bfloat16,
-                                enabled=torch.device(device).type == "cuda"):
-                loss = loss_fn(model, move_batch(batch, device))
-            count = float(batch["joint_mask"].float().sum())
-            numerator += float(loss) * count
-            valid_count += count
-    model.train()
-    return numerator / valid_count if valid_count else None
 
 
 def prepare_runtime_files(config, architecture, manifest_path, norm_path, output):
@@ -162,14 +146,21 @@ def train(config, *, dry_run=False):
                       "memory": report, "dry_run": dry_run}, ensure_ascii=False), flush=True)
     if dry_run:
         return report
+    restore_trainable_base(policy, base)
+    moe_config = configure_moe_loss(policy, config)
     total_gpu_gib = torch.cuda.get_device_properties(torch.device(device)).total_memory / 2**30
     if report["adamw_training_lower_bound_gib"] > total_gpu_gib * 0.92:
         raise RuntimeError(f"Weight/gradient/AdamW lower bound {report['adamw_training_lower_bound_gib']:.2f} GiB exceeds safe space on {total_gpu_gib:.2f} GiB GPU. Use LoRA or fewer expert_last_n_layers, or move to a larger server GPU.")
     from transformers import AutoProcessor
     processor = AutoProcessor.from_pretrained(qwen, padding_side="right", local_files_only=True)
+    seen_pool, seen_hash = (load_seen_pool(resolve_path(config["seen_instructions"]), manifest)
+                           if config.get("resample_seen_instructions", False) else (None, None))
     datasets, validation, splits = build_clean_datasets(manifest, data_config, policy.config, processor,
                                                        robot_config, int(config.get("val_episodes", 5)),
-                                                       action_chunk_tail=action_chunk_tail)
+                                                       action_chunk_tail=action_chunk_tail, seen_pool=seen_pool,
+                                                       seed=int(config.get("seed", 42)))
+    val_frames = int(config.get("validation_frames_per_episode", 1))
+    val_samples = validation_samples(validation, frames_per_episode=val_frames) if validation else []
     print(json.dumps({"training_samples": len(datasets),
                       "validation_samples": len(validation) if validation is not None else 0,
                       "action_chunk_tail": action_chunk_tail}, ensure_ascii=False), flush=True)
@@ -189,15 +180,18 @@ def train(config, *, dry_run=False):
     (output / "lingbotvla_cli.yaml").write_text(yaml.safe_dump(saved_cli, sort_keys=False))
     (output / "training_config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
     (output / "episode_splits.json").write_text(json.dumps(splits, indent=2))
+    (output / "validation_samples.json").write_text(json.dumps(val_samples, indent=2))
     metadata = {"base_checkpoint": str(base), "base_identity": base_identity,
                 "manifest_sha256": manifest_digest, "manifest_content_sha256": manifest_content_sha256(manifest),
                 "selection": selection,
                 "training_method": "clean_only_behavior_cloning", "competition_all_50_tasks": bool(manifest.get("complete_50_tasks")),
-                "loss_normalization": "valid_action_coordinate_mean_v1",
+                "loss_normalization": "bc_coordinate_mean_plus_moe_sample_mean_v2", "moe_loss": moe_config,
                 "data_sampling": {"action_chunk_tail": action_chunk_tail, "validation_action_chunk_tail": "mask",
                                   "val_episodes": int(config.get("val_episodes", 5)),
                                   "seed": int(config.get("seed", 42)), "batch_size": int(config.get("batch_size", 1)),
-                                  "gradient_accumulation": int(config.get("gradient_accumulation", 16))},
+                                  "gradient_accumulation": int(config.get("gradient_accumulation", 16)),
+                                  **sampling_identity(config, seen_hash),
+                                  "validation": validation_identity(val_samples, frames_per_episode=val_frames)},
                 "memory": report, "norm_sha256": hashlib.sha256(norm_path.read_bytes()).hexdigest(),
                 "qwen_config_sha256": hashlib.sha256((qwen / "config.json").read_bytes()).hexdigest(),
                 "model_geometry": {"chunk_size": policy.config.chunk_size, "max_action_dim": policy.config.max_action_dim,
@@ -224,13 +218,13 @@ def train(config, *, dry_run=False):
                                     state["epoch"], state["batch_offset"], workers))
 
     batches = iterator()
-    validation_loader = DataLoader(validation, batch_size=batch_size, collate_fn=model_collate, num_workers=0) if validation else None
     policy.train()
     optimizer.zero_grad(set_to_none=True)
     metrics_path = output / "metrics.jsonl"
     while state["global_step"] < max_steps:
         start = time.monotonic()
         loss_numerator, valid_count = 0.0, 0.0
+        update_batches = []
         for _ in range(accumulation):
             try:
                 batch = next(batches)
@@ -240,13 +234,25 @@ def train(config, *, dry_run=False):
                 batches = iterator()
                 batch = next(batches)
             state["batch_offset"] += 1
+            update_batches.append(batch)
+        # The two objectives have different denominators. Determine C/B over
+        # the entire update before backward so tail masks cannot change GA.
+        valid_count = sum(float(batch["joint_mask"].sum()) for batch in update_batches)
+        sample_count = sum(len(batch["actions"]) for batch in update_batches)
+        component_sums = {"bc_sum": 0.0, "moe_balance_sum": 0.0, "moe_z_sum": 0.0}
+        router_counts = {}
+        for batch in update_batches:
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                loss = flow_matching_bc(policy, move_batch(batch, device), reduction="sum")
+                loss, details = flow_matching_bc(policy, move_batch(batch, device), reduction="sum",
+                                                 auxiliary_scale=valid_count / sample_count, return_details=True)
             if not torch.isfinite(loss):
                 raise FloatingPointError(f"Nonfinite BC loss at step {state['global_step']}")
             loss.backward()
             loss_numerator += float(loss.detach())
-            valid_count += float(batch["joint_mask"].float().sum())
+            for key in component_sums:
+                component_sums[key] += float(details[key])
+            for layer, load in details["router_loads"].items():
+                router_counts[layer] = router_counts.get(layer, 0) + load["tokens_per_expert"]
         normalize_bc_gradients(params, valid_count)
         grad = torch.nn.utils.clip_grad_norm_(params, float(config.get("max_grad_norm", 1)))
         if not torch.isfinite(grad):
@@ -257,11 +263,17 @@ def train(config, *, dry_run=False):
         state["global_step"] += 1
         step = state["global_step"]
         record = {"step": step, "loss": loss_numerator / valid_count, "grad_norm": float(grad),
+                  "bc_loss": component_sums["bc_sum"] / valid_count,
+                  "moe_balance_loss": component_sums["moe_balance_sum"] / sample_count,
+                  "router_z_loss": component_sums["moe_z_sum"] / sample_count,
+                  "router_loads": router_load_metrics(router_counts),
                   "valid_action_coordinates": valid_count,
                   "lr": optimizer.param_groups[0]["lr"], "step_seconds": time.monotonic() - start,
                   "peak_gpu_gib": torch.cuda.max_memory_allocated(torch.device(device)) / 2**30}
-        if validation_loader and step % int(config.get("eval_every", 100)) == 0:
-            record["validation_bc_loss"] = validate(policy, validation_loader, device, int(config.get("eval_batches", 8)))
+        if validation and step % int(config.get("eval_every", 100)) == 0:
+            record.update(validate_stratified(policy, validation, device, batch_size=batch_size,
+                                             samples=val_samples, loss_fn=flow_matching_bc,
+                                             frames_per_episode=val_frames))
         print(json.dumps(record), flush=True)
         with metrics_path.open("a") as log:
             log.write(json.dumps(record) + "\n")
@@ -273,7 +285,8 @@ def train(config, *, dry_run=False):
     if config.get("export", True):
         checkpoint_dir = output / "checkpoints" / f"global_step_{state['global_step']}"
         exported = export_hf_checkpoint(policy, checkpoint_dir / "hf_ckpt",
-                                        dtype=getattr(torch, config.get("export_dtype", "bfloat16")), processor=processor)
+                                        dtype=getattr(torch, config.get("export_dtype", "float32")), processor=processor,
+                                        base_checkpoint=base, expected_base_identity=base_identity, selection=selection)
         print(json.dumps({"exported_hf_ckpt": str(exported), "official_cli": str(output / "lingbotvla_cli.yaml")}), flush=True)
     return state
 

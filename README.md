@@ -11,7 +11,8 @@ lingbot-vla-robotwin/
 ├── configs/                 # 训练 YAML、任务列表、原始数据哈希清单
 │   ├── train_lora.yaml
 │   ├── train_expert.yaml
-│   └── train_expert_full.yaml # 多卡完整 Action Expert，VLM 冻结
+│   ├── train_expert_full.yaml # 多卡完整 Action Expert，VLM 冻结
+│   └── eval.yaml             # 后端、精度、动作长度、去噪步数
 ├── src/lrvla/               # 数据加载、模型适配、训练、checkpoint 和推理
 ├── scripts/                 # 环境安装、资源下载、数据转换及诊断入口
 │   └── run_with_batch_fallback.py # CUDA OOM 后降低 batch 重试的多卡入口
@@ -162,12 +163,26 @@ source scripts/activate.sh
 | `val_episodes` | `5` | 每任务留出的验证轨迹数 |
 | `gradient_checkpointing` | `true` | 减少反向传播的激活显存 |
 | `eval_every` / `save_every` | `100` | 验证、保存的更新间隔 |
-| `eval_batches` | `8` | 每次验证最多处理的小 batch 数 |
-| `export` / `export_dtype` | `true` / `bfloat16` | 结束后导出完整推理权重及其精度 |
+| `validation_frames_per_episode` | `1` | 每条留出轨迹固定抽取的验证帧数 |
+| `resample_seen_instructions` | `false` | 是否从同轨迹 seen 指令池确定性重采样 |
+| `sequence_wise_loss_coeff` / `router_z_loss_coeff` | `0.001` / `0.0001` | MoE 负载均衡与路由 z-loss 系数 |
+| `export` / `export_dtype` | `true` / `float32` | 结束后导出完整推理权重及其精度 |
 
 有效 batch 约为 `batch_size × gradient_accumulation`。例如 `batch_size=8`、累积 4 次、`max_steps=2500`，共执行 **10,000 个小 batch、2,500 次参数更新**。这里的 step、预热、验证和保存间隔都按优化器更新计数。
 
 `action_chunk_tail: mask` 保留轨迹末端观测，padding 不参与损失；累积梯度按整个更新窗口的有效动作坐标数统一归一化。`drop` 只保留训练集的完整动作窗口，验证集仍保留全部观测。截断会减少末段观测作为训练起点的覆盖。
+
+训练目标为有效动作坐标上的 flow-matching BC 均值，加样本均值归一化的 MoE sequence balance 和 router z-loss；两者分别在整个更新窗口及全部 GPU 上归一化。日志分别记录 `bc_loss`、`moe_balance_loss`、`router_z_loss` 和每层全局专家负载。LoRA 的路由器虽然冻结，辅助损失仍能通过 hidden states 更新 LoRA；将两个系数都设为 `0` 可运行纯动作 BC。
+
+验证按每个任务的每条留出轨迹分层抽帧，50 个任务、每任务 5 条留出轨迹时默认评估 250 帧；旧 `eval_batches` 不再截断验证集。样本列表保存在 `validation_samples.json`，日志记录覆盖范围及各任务 BC 损失。验证的 flow 噪声和时间按样本身份固定，与 batch 和 GPU 数无关。验证始终关闭图像增强和指令重采样。
+
+默认仍使用转换时固定的 seen 指令。要启用同轨迹指令重采样，先生成旁路文件，无需重新编码视频：
+
+```bash
+python scripts/prepare_seen_instructions.py --manifest data/clean_manifest.json
+```
+
+随后在训练 YAML 设置 `resample_seen_instructions: true`、`seen_instructions: data/clean_seen_instructions.json`。仅从当前轨迹的 seen 列表取指令，按 seed、epoch、任务、轨迹和帧确定性选择，不增加样本数。旁路文件内容哈希及增强参数纳入续训校验。
 
 可复制预设 YAML 调整实验。LoRA rank、alpha、学习率、动作块长度和尾部策略等需要修改 YAML；常用命令行覆盖项可通过帮助查看：
 
@@ -259,6 +274,18 @@ runs/<experiment>/
 
 按 `save_every` 保存 `training.pt`；正常完成训练且 `export: true` 时，在最终 step 目录导出 `hf_ckpt/`。恢复使用 `training.pt`，推理使用 `hf_ckpt/`。
 
+默认导出 FP32：冻结部分读取 SHA-256 匹配的原始基模，训练部分使用 FP32 主权重，LoRA 用原始 FP32 base 加 FP32 adapter 增量合并。训练仍使用冻结 BF16 权重与 BF16 autocast，可训练参数从原始 FP32 基模初始化。`export_dtype: bfloat16` 可生成较小的导出，但事后上转 FP32 无法恢复舍入精度。
+
+已有训练状态可在 CPU 上另行导出，不加载优化器、不要求原训练 GPU 数，也不覆盖已有导出：
+
+```bash
+python scripts/export_checkpoint.py \
+  --checkpoint runs/expert_full_clean/checkpoints/global_step_10000/distributed \
+  --base-checkpoint models/lingbot-vla-v2-6b
+```
+
+默认生成相邻的 `hf_ckpt_float32/`；单卡将 `--checkpoint` 指向 `training.pt`。保留同一 run 的处理器、配置和归一化资源。只有 BF16 推理文件而没有 FP32 训练状态时，无法恢复训练部分的原始精度。
+
 ```bash
 bash train.sh --config configs/train_lora.yaml \
   --resume runs/lora_clean/checkpoints/global_step_100/training.pt
@@ -295,26 +322,30 @@ python scripts/open_loop.py \
 ```bash
 bash eval.sh --checkpoint runs/lora-one-step/checkpoints/global_step_1/hf_ckpt \
   --tasks adjust_bottle --setting demo_clean --trials 2 --precision bf16 \
-  --use-length 10
+  --backend streamed --use-length 10
 ```
 
-默认每次生成 50 条动作，`--use-length 10` 返回并执行前 10 条，然后获取新观测重新规划。离线动作误差用于预测诊断，闭环结果用于衡量实际任务成功率。评估入口使用命令行参数；训练使用 YAML。
+默认每次生成 50 条动作，`--use-length 10` 返回并执行前 10 条，然后获取新观测重新规划。离线动作误差用于预测诊断，闭环结果用于衡量实际任务成功率。评测默认读取 [configs/eval.yaml](configs/eval.yaml)：原生后端、FP32、执行 50 条、去噪 10 步、关闭 compile、无动作平滑。这是可复现的基线配置，尚未调优；CLI 可覆盖 YAML，低显存检查可显式选择 `--backend streamed`。
 
 对同一导出模型运行全部任务、两种环境各 100 个场景：
 
 ```bash
 bash eval.sh --checkpoint runs/expert_full_clean/checkpoints/global_step_10000/hf_ckpt \
-  --tasks all --setting both --trials 100 --precision fp32 --native-server \
-  --use-length 50 --output runs/evaluation/expert-full
+  --config configs/eval.yaml --tasks all --setting both --trials 100 \
+  --output runs/evaluation/expert-full
 ```
 
 这会运行 50 × 2 × 100 个场景，使用原生 FP32 推理，需要相应显存和仿真环境。结果写入输出目录的 `results.json`；添加 `--skip-completed` 可保留已完成任务，重新运行失败任务，并校验模型权重与评测协议一致。
+
+闭环客户端适配位于 [src/lrvla/evaluation.py](src/lrvla/evaluation.py)，运行时生成客户端副本，不修改上游文件：场景数参数化；移除未使用的 `get_model` 查找；每场景最多五次专家启动，失败后推进 seed，策略使用最后一次 seed；策略初始化的 `UnStableError` 计为一次失败并继续，其他错误仍终止。初始化失败也可能导致零次模型调用，环境预检还需检查真实 RGB 推理和动作日志。
+
+专家元数据缺失时由 [src/lrvla/scene_metadata.py](src/lrvla/scene_metadata.py) 恢复场景物体描述，再使用原始指令模板。客户端以 `check_success()` 判断成功；上游 `take_action` 也在插值子步调用该函数，成功时设置 `eval_success` 并返回。客户端移除按任务切换权重的路径，全程使用同一 checkpoint。原生服务保留上游模型和内核，仅将配置的去噪步数设置到实际采样模型；后端、精度、去噪步数、执行长度、compile 和平滑均进入结果及恢复校验。新旧客户端协议使用不同输出目录。
 
 ### 3.6 多卡完整 Action Expert
 
 `configs/train_expert_full.yaml` 使用 `mode: expert`、`expert_last_n_layers: -1`，训练全部 36 层 Expert 及状态／动作投影，冻结视觉语言 backbone。可训练参数约 17.89 亿。`torchrun` 启动时，训练入口使用 FSDP 分片 Expert 参数、梯度和 AdamW 状态；`fsdp_wrap: decoder_layer` 按解码层分别包装，将临时汇集的参数组由约 6.66 GiB 降到每层约 0.185 GiB。冻结参数保持 BF16，每张卡保留一份，Expert 的参数及优化器状态使用 FP32，计算使用 BF16 autocast。
 
-当前预设面向四卡：每卡 batch 为 16，`global_batch_size: 64`，`gradient_accumulation: 1`，不做梯度累积；`require_no_gradient_accumulation: true` 防止修改每卡 batch 后自动引入累积。每项作业执行 1000 次优化器更新，合计约 64000 个训练样本。50 个 clean 任务按帧合并并随机打乱；每任务前 45 个 episode 训练，后 5 个验证。终止帧保留，填充动作不计入损失。损失按全部 GPU 的有效动作坐标总数归一化。学习率为 `5e-5`，前 100 次更新预热，每 100 次更新验证和保存。
+当前预设面向四卡：每卡 batch 为 16，`global_batch_size: 64`，`gradient_accumulation: 1`，不做梯度累积；`require_no_gradient_accumulation: true` 防止修改每卡 batch 后自动引入累积。每项作业执行 1000 次优化器更新，合计约 64000 个训练样本。50 个 clean 任务按帧合并并随机打乱；每任务前 45 个 episode 训练，后 5 个验证。终止帧保留，填充动作不计入 BC 损失，MoE 辅助损失按全局样本数归一化。学习率为 `5e-5`，前 100 次更新预热，每 100 次更新验证和保存。
 
 准备好全部 clean 数据及其 norm provenance 后，可直接用 `torchrun` 固定 batch 训练，或使用独立启动器在 CUDA 显存不足时从基模重新开始一次较小 batch 的训练。每卡 batch 与全局 batch 必须同时匹配 GPU 数。
 
@@ -348,3 +379,5 @@ python scripts/run_with_batch_fallback.py \
 完整 Expert 的每次分片 checkpoint 总计约 20 GiB，应将 `runs/` 放在足够大的存储中。多卡 checkpoint 是包含 `shards/`、每 rank 随机状态及 `complete.json` 的目录；`latest_checkpoint.txt` 指向此目录。使用 `--resume <目录>` 恢复，要求相同 GPU 数和数据采样配置。训练结束后只由 rank 0 导出完整、可独立推理的 `hf_ckpt`，其中包含冻结 backbone 和训练后的 Expert。日志记录每张卡的实际分配／保留显存峰值、更新耗时及 checkpoint 耗时。
 
 采样器在每个 epoch 中先全局随机排列所有训练帧，再分配给各 GPU，消费完当前排列后才进入下一轮。以 494328 个训练帧、全局 batch 64 为例，一轮需要 7724 次更新，末尾仅补齐 8 个重复帧；从基模训练 10000 次更新会完成全部训练样本的首轮遍历。日志的 `epoch` 和 `batch_offset` 可用于核对遍历进度。训练规模直接修改现有 `configs/train_expert_full.yaml` 的 `max_steps`，或用 `--max-steps` 覆盖。
+
+10000 × 64 约等于 1.29 遍该训练集。覆盖全部样本不代表收敛；总步数应结合覆盖全任务的验证曲线和独立评估决定，仓库不自动延长训练或解冻 VLM。

@@ -17,12 +17,14 @@ import socket
 import subprocess
 import sys
 import time
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from lrvla.data import parse_tasks
 from lrvla.evaluation import (
-    INSTRUCTIONS, ROBOTWIN_REVISION, aggregate_results, create_eval_runtime, evaluation_task_complete, export_official_results,
+    EXPERT_SEED_POLICY, INSTRUCTIONS, ROBOTWIN_REVISION, aggregate_results, create_eval_runtime,
+    evaluation_task_complete, export_official_results,
 )
 from lrvla.training_identity import base_checkpoint_identity
 from lrvla.vendor_sources import upstream_revision
@@ -51,7 +53,8 @@ def prepare_resumed_plan(run, plan):
             raise ValueError("Existing evaluation logs have no fixed-checkpoint plan; use a new output directory.")
         return None
     previous = json.loads(existing.read_text())
-    for key in ("checkpoint", "precision", "trials", "tasks", "settings", "inference_backend", "use_length"):
+    for key in ("checkpoint", "precision", "trials", "tasks", "settings", "inference_backend", "use_length",
+                "num_steps", "compile", "action_smoothing", "expert_seed_policy"):
         if previous.get(key) != plan.get(key):
             raise ValueError(f"Evaluation resume mismatch for {key}; use the same checkpoint and protocol.")
     if previous.get("checkpoint_identity") is None and any(run.glob("*/eval_logs/*.log")):
@@ -70,8 +73,21 @@ def archive_previous_attempt(run, paths):
         path.replace(destination)
 
 
-def main():
+def parse_args(argv=None):
+    initial = argparse.ArgumentParser(add_help=False)
+    initial.add_argument("--config", type=Path, default=ROOT / "configs/eval.yaml")
+    config_args, _ = initial.parse_known_args(argv)
+    profile = yaml.safe_load(config_args.config.read_text())
+    allowed = {"backend", "precision", "use_length", "num_steps", "compile", "action_smoothing"}
+    if not isinstance(profile, dict) or set(profile) - allowed:
+        raise ValueError("Unknown evaluation YAML fields; expected inference profile settings.")
+    if "compile" in profile and type(profile["compile"]) is not bool:
+        raise ValueError("Evaluation compile must be a YAML boolean.")
+    for key in ("num_steps", "use_length"):
+        if key in profile and type(profile[key]) is not int:
+            raise ValueError(f"Evaluation {key} must be a YAML integer.")
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=config_args.config)
     parser.add_argument("--checkpoint", type=Path, required=True, help="Exported run/checkpoints/global_step_N/hf_ckpt")
     parser.add_argument("--tasks", default="all")
     parser.add_argument("--setting", choices=["both", *INSTRUCTIONS], default="both")
@@ -87,30 +103,51 @@ def main():
     parser.add_argument("--gpu", default="0")
     parser.add_argument("--port", type=int, default=9330)
     parser.add_argument("--use-length", type=int, default=50)
-    parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--num-steps", type=int, default=10)
+    parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--action-smoothing", choices=["none"], default="none")
     parser.add_argument("--video", action="store_true")
-    parser.add_argument("--native-server", action="store_true", help="Use upstream full-FP32 constructor; needs substantial host RAM")
+    parser.add_argument("--backend", choices=["native", "streamed"], default="native")
+    parser.add_argument("--native-server", dest="backend", action="store_const", const="native", help="Alias for --backend native")
     parser.add_argument("--server-timeout", type=int, default=1800)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--aggregate-only", action="store_true")
     parser.add_argument("--skip-completed", action="store_true", help="Resume this same fixed protocol, retaining completed tasks and archiving failed attempts")
     parser.add_argument("--team-id", default="replace_with_your_team_id")
-    args = parser.parse_args()
+    parser.set_defaults(**profile)
+    args = parser.parse_args(argv)
+    if args.backend not in {"native", "streamed"} or args.precision not in {"fp32", "bf16"}:
+        parser.error("Invalid backend or precision in evaluation config")
+    if args.action_smoothing != "none" or args.num_steps <= 0 or not 1 <= args.use_length <= 50:
+        parser.error("Expected positive num_steps, use_length 1..50, action_smoothing none")
+    return args
+
+
+def main():
+    args = parse_args()
     if args.smoke:
         args.tasks, args.trials, args.precision = "adjust_bottle", 2, "bf16"
     tasks = parse_tasks(args.tasks)
     settings = list(INSTRUCTIONS) if args.setting == "both" else [args.setting]
     if not 1 <= args.trials <= 100:
-        parser.error("--trials must be 1..100")
+        raise ValueError("--trials must be 1..100")
     if args.precision == "bf16":
         print("BF16 is an approximate pipeline check; official published validation uses FP32 and roughly 32 GB with simulation.")
-    backend = "native" if args.native_server else "streamed_sdpa_reference_moe"
-    if not args.native_server:
+    backend = "native" if args.backend == "native" else "streamed_sdpa_reference_moe"
+    if args.backend != "native":
         print("The streamed server uses SDPA/reference MoE kernels; equivalence to the official FP32 server remains unverified.")
     run = args.output or ROOT / "runs/evaluation" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run = run.resolve()
     run.mkdir(parents=True, exist_ok=True)
     if args.aggregate_only:
+        previous = json.loads((run / "evaluation_plan.json").read_text())
+        profile = {"precision": args.precision, "inference_backend": backend, "use_length": args.use_length,
+                   "num_steps": args.num_steps, "compile": args.compile, "action_smoothing": args.action_smoothing,
+                   "expert_seed_policy": EXPERT_SEED_POLICY, "trials": args.trials, "tasks": tasks, "settings": settings,
+                   "checkpoint": str(args.checkpoint.resolve())}
+        prepare_resumed_plan(run, profile)
+        if base_checkpoint_identity(args.checkpoint.resolve()) != previous.get("checkpoint_identity"):
+            raise ValueError("Aggregate checkpoint identity differs from the saved plan.")
         report = aggregate_results(run, tasks, settings, args.precision, args.trials, backend, use_length=args.use_length)
         export_official_results(report, run / "official_results.json", args.team_id, ROOT / "docs/official-templates/初赛评测结果模板_JSON版.json")
         print(json.dumps(report, indent=2))
@@ -133,10 +170,11 @@ def main():
     sim_environment = dict(shared_environment)
     sim_environment["PATH"] = os.pathsep.join(filter(None, [str(sim_python.parent), shared_environment.get("PATH", "")]))
     sim_environment["LD_LIBRARY_PATH"] = os.pathsep.join(filter(None, [str(conda_root / "envs" / args.sim_env / "lib"), shared_environment.get("LD_LIBRARY_PATH", "")]))
-    server_entry = ["-m", "deploy.lingbot_vla_v2_policy"] if args.native_server else [str(ROOT / "scripts/serve_streamed.py")]
+    server_entry = [str(ROOT / "scripts/serve_native.py" if args.backend == "native" else ROOT / "scripts/serve_streamed.py")]
     infer = [str(infer_python), *server_entry,
              "--model_path", str(checkpoint), "--use_length", str(args.use_length), "--use_bf16", str(args.precision == "bf16"),
-             "--use_fp32", str(args.precision == "fp32"), "--use_compile", str(args.compile), "--port", str(args.port)]
+             "--use_fp32", str(args.precision == "fp32"), "--use_compile", str(args.compile), "--port", str(args.port),
+             "--num_steps", str(args.num_steps)]
     commands = []
     for setting in settings:
         for task in tasks:
@@ -148,10 +186,13 @@ def main():
             commands.append({"setting": setting, "task": task, "command": command})
     plan = {"checkpoint": str(checkpoint), "model_run": str(model_run), "precision": args.precision, "trials": args.trials,
             "inference_backend": backend, "use_length": args.use_length,
+            "num_steps": args.num_steps, "compile": args.compile, "action_smoothing": args.action_smoothing,
             "tasks": tasks, "settings": settings, "inference_command": infer, "evaluation_commands": commands,
-            "instruction_types": INSTRUCTIONS, "expert_starts_per_scene": 5, "fixed_checkpoint": True,
+            "instruction_types": INSTRUCTIONS, "expert_starts_per_scene": 5,
+            "expert_seed_policy": EXPERT_SEED_POLICY, "fixed_checkpoint": True,
             "full_protocol": (len(tasks) == 50 and args.trials == 100 and len(settings) == 2
-                              and args.precision == "fp32" and backend == "native" and args.use_length == 50),
+                              and args.precision == "fp32" and backend == "native" and args.use_length == 50
+                              and args.num_steps == 10 and not args.compile and args.action_smoothing == "none"),
             "schema": "official schema_version=1; precision and protocol recorded in sidecar"}
     prior_identity = prepare_resumed_plan(run, plan) if args.skip_completed else None
     if prior_identity is not None:

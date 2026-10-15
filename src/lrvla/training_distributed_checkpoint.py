@@ -14,13 +14,13 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions, get_model_state_dict, get_state_dict, set_state_dict,
 )
 
-from .training_checkpoint import export_hf_checkpoint
+from .training_checkpoint import export_hf_checkpoint, overlay_base_state_items
 
 
 FORMAT = "lrvla-fsdp-v1"
 IDENTITY_KEYS = (
     "base_identity", "manifest_content_sha256", "selection", "norm_sha256",
-    "model_geometry", "qwen_config_sha256", "loss_normalization", "data_sampling", "distributed",
+    "model_geometry", "qwen_config_sha256", "loss_normalization", "moe_loss", "data_sampling", "distributed",
 )
 
 
@@ -158,7 +158,8 @@ def resume_distributed_checkpoint(model, optimizer, scheduler, checkpoint, *, ex
     return run["state"]
 
 
-def export_distributed_hf(model, policy, output, *, dtype, processor, rank):
+def export_distributed_hf(model, policy, output, *, dtype, processor, rank,
+                          base_checkpoint=None, expected_base_identity=None, selection=None):
     """All ranks gather the full VLA; rank zero writes inference-ready shards."""
     _check_group(rank, dist.get_world_size() if dist.is_initialized() else 0)
     state = get_model_state_dict(model, options=StateDictOptions(full_state_dict=True, cpu_offload=True))
@@ -169,7 +170,41 @@ def export_distributed_hf(model, policy, output, *, dtype, processor, rank):
                 if not name.startswith("policy."):
                     raise ValueError(f"Unexpected state key outside BCForward.policy: {name}")
                 yield name.removeprefix("policy."), value
-        exported = export_hf_checkpoint(policy, output, dtype=dtype, processor=processor,
-                                        state_items=policy_state_items())
+        items = policy_state_items()
+        if base_checkpoint is not None:
+            masters = {name: state[f"policy.{name}"] for name in selection["trainable_names"]}
+            items = overlay_base_state_items(base_checkpoint, masters, selection,
+                                            expected_base_identity=expected_base_identity)
+        exported = export_hf_checkpoint(policy, output, dtype=dtype, processor=processor, state_items=items)
+        if base_checkpoint is not None:
+            record = json.loads((exported / "export.json").read_text())
+            record.update(frozen_source="original_base", trainable_source="fp32_master",
+                          base_identity=expected_base_identity)
+            _atomic_json(exported / "export.json", record)
     dist.barrier()
     return exported
+
+
+def load_distributed_export(checkpoint):
+    """Read only FP32 model masters on CPU, regardless of training GPU count."""
+    checkpoint = Path(checkpoint)
+    complete_path, run_path = checkpoint / "complete.json", checkpoint / "run_state.json"
+    if not complete_path.is_file() or not run_path.is_file():
+        raise ValueError("Distributed checkpoint is incomplete.")
+    complete, run = json.loads(complete_path.read_text()), json.loads(run_path.read_text())
+    if (complete.get("format") != FORMAT or run.get("format") != FORMAT or
+            complete.get("run_state_sha256") != hashlib.sha256(run_path.read_bytes()).hexdigest()):
+        raise ValueError("Distributed checkpoint completion marker/format mismatch.")
+    reader = dcp.FileSystemReader(checkpoint / "shards")
+    metadata = reader.read_metadata()
+    requested = {}
+    for name in run["metadata"]["selection"]["trainable_names"]:
+        key = f"model.policy.{name}"
+        if key not in metadata.state_dict_metadata:
+            raise ValueError(f"Distributed checkpoint missing trainable: {name}")
+        info = metadata.state_dict_metadata[key]
+        if info.properties.dtype != torch.float32:
+            raise ValueError(f"Distributed export requires FP32 master: {name}")
+        requested[f"policy.{name}"] = torch.empty(info.size, dtype=info.properties.dtype)
+    dcp.load({"model": requested}, storage_reader=reader, no_dist=True)
+    return {name.removeprefix("policy."): value for name, value in requested.items()}, run

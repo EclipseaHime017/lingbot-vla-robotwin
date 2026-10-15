@@ -101,8 +101,9 @@ def episode_split(ids, val_episodes):
 
 class LocalCleanDataset(Dataset):
     def __init__(self, entry, episodes, data_config, model_config, processor, robot_config,
-                 training=True, action_chunk_tail="mask"):
+                 training=True, action_chunk_tail="mask", seen_pool=None, seed=42):
         action_chunk_tail = validate_action_chunk_tail(action_chunk_tail)
+        self.task, self.seen_pool, self.seed, self.epoch = entry["task"], seen_pool if training else None, seed, 0
         from torchvision.transforms.v2 import Resize
         from lingbotvla.data.vla_data.base_dataset import LeRobotDatasetMetadata
         from lingbotvla.data.vla_data.utils import FeatureTransform
@@ -142,6 +143,11 @@ class LocalCleanDataset(Dataset):
         if indices is not None:
             idx = indices[idx]
         raw = self.dataset[idx]
+        if getattr(self, "seen_pool", None) is not None:
+            from .training_instructions import sample_seen
+            raw = dict(raw)
+            raw["task"] = sample_seen(self.seen_pool, self.task, int(raw["episode_index"]), int(raw["frame_index"]),
+                                      seed=self.seed, epoch=self.epoch)
         # Joint-space data has [14] states and [T,14] absolute action chunks.
         if raw["observation.state"].shape[-1] != 14 or raw["action"].shape[-1] != 14:
             raise ValueError("Competition baseline requires joint-space 14D state/actions.")
@@ -156,7 +162,7 @@ class LocalCleanDataset(Dataset):
 
 
 def build_clean_datasets(manifest, data_config, model_config, processor, robot_config,
-                         val_episodes=5, action_chunk_tail="mask"):
+                         val_episodes=5, action_chunk_tail="mask", seen_pool=None, seed=42):
     action_chunk_tail = validate_action_chunk_tail(action_chunk_tail)
     if manifest.get("clean_only") is not True:
         raise ValueError("A verified clean_only manifest is required.")
@@ -166,7 +172,7 @@ def build_clean_datasets(manifest, data_config, model_config, processor, robot_c
         train_ids, val_ids = episode_split(ids, val_episodes)
         splits[entry["task"]] = {"train": train_ids, "validation": val_ids}
         train.append(LocalCleanDataset(entry, train_ids, data_config, model_config, processor, robot_config,
-                                       action_chunk_tail=action_chunk_tail))
+                                       action_chunk_tail=action_chunk_tail, seen_pool=seen_pool, seed=seed))
         if val_ids:
             validation.append(LocalCleanDataset(entry, val_ids, data_config, model_config, processor, robot_config, False))
     if not train:
@@ -192,6 +198,8 @@ class EpochBatchSampler(Sampler):
 
 
 def epoch_dataloader(dataset, batch_size, seed, epoch=0, offset=0, num_workers=0, collate_fn=model_collate):
+    from .training_instructions import set_dataset_epoch
+    set_dataset_epoch(dataset, epoch)
     sampler = EpochBatchSampler(len(dataset), batch_size, seed, epoch, offset)
     # DataLoader draws its worker/base seed even with num_workers=0. Isolate that
     # draw so constructing a resumed iterator does not change saved FM noise RNG.

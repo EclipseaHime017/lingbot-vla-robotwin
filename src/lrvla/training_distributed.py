@@ -19,10 +19,13 @@ from torch.utils.data import DataLoader, Sampler
 import yaml
 
 from .training_data import build_clean_datasets, model_collate
+from .training_checkpoint import restore_trainable_base
 from .training_fsdp import fsdp_shard_report, wrap_expert_fsdp
 from .training_identity import base_checkpoint_identity, manifest_content_sha256
-from .training_models import configure_trainable, memory_report, normalize_bc_gradients
+from .training_models import configure_moe_loss, configure_trainable, memory_report, normalize_bc_gradients, router_load_metrics
+from .training_instructions import load_seen_pool, sampling_identity, set_dataset_epoch
 from .training_runtime import build_policy, enable_action_checkpointing
+from .training_validation import validate_stratified, validation_identity, validation_samples
 
 
 def accumulation_for_world(config, world_size):
@@ -73,6 +76,7 @@ class DistributedEpochBatchSampler(Sampler):
 
 
 def distributed_dataloader(dataset, batch_size, seed, *, rank, world_size, epoch=0, offset=0, num_workers=0):
+    set_dataset_epoch(dataset, epoch)
     sampler = DistributedEpochBatchSampler(len(dataset), batch_size, seed, rank=rank,
                                           world_size=world_size, epoch=epoch, offset=offset)
     rng = torch.Generator().manual_seed(seed + 100000 + epoch + rank)
@@ -91,39 +95,6 @@ def all_ranks_finite(value, device):
     flag = torch.tensor(int(bool(torch.isfinite(value).all())), device=device, dtype=torch.int32)
     dist.all_reduce(flag, op=dist.ReduceOp.MIN)
     return bool(flag.item())
-
-
-def validate_distributed(model, dataset, device, *, batch_size, max_batches, rank, world_size):
-    """Evaluate the same first max_batches global batches on any GPU count."""
-    limit = min(len(dataset), max_batches * batch_size)
-    if not limit:
-        return None
-    rounds = math.ceil(limit / (batch_size * world_size))
-    totals = torch.zeros(2, dtype=torch.float64, device=device)
-    model.eval()
-    with torch.random.fork_rng(devices=[device.index]), torch.no_grad():
-        torch.manual_seed(12345 + rank)
-        for step in range(rounds):
-            ids = [step * batch_size * world_size + rank * batch_size + i for i in range(batch_size)]
-            batch = model_collate([dataset[min(index, limit - 1)] for index in ids])
-            # Mark padded samples only for aggregation; each rank must still
-            # participate in the same FSDP forwards, including a final round.
-            real_mask = torch.tensor([index < limit for index in ids], dtype=torch.bool)
-            batch["joint_mask"][~real_mask] = False
-            valid = float(batch["joint_mask"].float().sum())
-            if not valid:
-                # masked_bc_loss rejects an entirely padded batch. Compute a
-                # harmless duplicate and give it zero weight below.
-                batch = model_collate([dataset[limit - 1] for _ in ids])
-            batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                numerator = model(batch, reduction="sum")
-            if valid:
-                totals[0] += numerator.double()
-                totals[1] += valid
-    dist.all_reduce(totals)
-    model.train()
-    return float(totals[0] / totals[1]) if float(totals[1]) else None
 
 
 def sharded_memory_estimate(report, world_size, *, largest_shard_parameters=None):
@@ -201,6 +172,8 @@ def train_distributed(config):
         data_config, robot_config, manifest_digest, base_identity = shared[0]
         policy = build_policy(PROJECT_ROOT, architecture, base, qwen, device=device)
         selection = configure_trainable(policy, config)
+        restore_trainable_base(policy, base)
+        moe_config = configure_moe_loss(policy, config)
         report = memory_report(policy)
         shard_report = fsdp_shard_report(policy, layer_sharding=layer_sharding)
         estimate = sharded_memory_estimate(
@@ -211,9 +184,13 @@ def train_distributed(config):
             raise RuntimeError("Sharded persistent parameter/optimizer state exceeds available GPU memory.")
         from transformers import AutoProcessor
         processor = AutoProcessor.from_pretrained(qwen, padding_side="right", local_files_only=True)
+        seen_pool, seen_hash = (load_seen_pool(resolve_path(config["seen_instructions"]), manifest)
+                               if config.get("resample_seen_instructions", False) else (None, None))
         datasets, validation, splits = build_clean_datasets(
             manifest, data_config, policy.config, processor, Path(robot_config), int(config.get("val_episodes", 5)),
-            action_chunk_tail=config.get("action_chunk_tail", "mask"))
+            action_chunk_tail=config.get("action_chunk_tail", "mask"), seen_pool=seen_pool, seed=seed)
+        val_frames = int(config.get("validation_frames_per_episode", 1))
+        val_samples = validation_samples(validation, frames_per_episode=val_frames) if validation else []
         if config.get("gradient_checkpointing", True):
             enable_action_checkpointing(policy)
         train_values = {**architecture["train"], **policy.config.to_dict()}
@@ -226,12 +203,14 @@ def train_distributed(config):
             "manifest_sha256": manifest_digest, "manifest_content_sha256": manifest_content_sha256(manifest),
             "selection": selection, "training_method": "clean_only_behavior_cloning",
             "competition_all_50_tasks": bool(manifest.get("complete_50_tasks")),
-            "loss_normalization": "valid_action_coordinate_mean_v1",
+            "loss_normalization": "bc_coordinate_mean_plus_moe_sample_mean_v2", "moe_loss": moe_config,
             "data_sampling": {"action_chunk_tail": config.get("action_chunk_tail", "mask"),
                               "validation_action_chunk_tail": "mask", "val_episodes": int(config.get("val_episodes", 5)),
                               "seed": seed, "batch_size": int(config.get("batch_size", 1)),
                               "gradient_accumulation": accumulation, "world_size": world_size,
-                              "global_batch_size": global_batch, "epoch_end_padding": "repeat_initial_permutation_samples"},
+                              "global_batch_size": global_batch, "epoch_end_padding": "repeat_initial_permutation_samples",
+                              **sampling_identity(config, seen_hash),
+                              "validation": validation_identity(val_samples, frames_per_episode=val_frames)},
             "distributed": config["distributed"], "memory": report, "sharded_memory_estimate": estimate,
             "fsdp_shards": shard_report,
             "training_samples": len(datasets), "validation_samples": len(validation) if validation else 0,
@@ -249,6 +228,7 @@ def train_distributed(config):
             (output / "lingbotvla_cli.yaml").write_text(yaml.safe_dump(saved_cli, sort_keys=False))
             (output / "training_config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
             (output / "episode_splits.json").write_text(json.dumps(splits, indent=2))
+            (output / "validation_samples.json").write_text(json.dumps(val_samples, indent=2))
             (output / "run_metadata.json").write_text(json.dumps(metadata, indent=2))
             print(json.dumps({"world_size": world_size, "global_batch_size": global_batch,
                               "per_rank_batch_size": config.get("batch_size", 1), "gradient_accumulation": accumulation,
@@ -282,7 +262,8 @@ def train_distributed(config):
         while state["global_step"] < max_steps:
             torch.cuda.synchronize(device)
             start = time.monotonic()
-            totals = torch.zeros(2, device=device, dtype=torch.float64)
+            totals = torch.zeros(5, device=device, dtype=torch.float64)
+            update_batches = []
             for _ in range(accumulation):
                 try:
                     batch = next(batches)
@@ -292,9 +273,17 @@ def train_distributed(config):
                     batches = iterator()
                     batch = next(batches)
                 state["batch_offset"] += 1
+                update_batches.append(batch)
+            counts = torch.tensor([sum(float(b["joint_mask"].sum()) for b in update_batches),
+                                   sum(len(b["actions"]) for b in update_batches)], device=device, dtype=torch.float64)
+            dist.all_reduce(counts)
+            valid_count, sample_count = map(float, counts)
+            router_counts = {}
+            for batch in update_batches:
                 batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
                 with torch.autocast("cuda", dtype=torch.bfloat16):
-                    loss = model(batch, reduction="sum")
+                    loss, details = model(batch, reduction="sum", auxiliary_scale=valid_count / sample_count,
+                                          return_details=True)
                 if not all_ranks_finite(loss, device):
                     raise FloatingPointError("A rank produced a nonfinite BC loss.")
                 # Reduce-scatter on every microbatch keeps accumulated gradients
@@ -302,8 +291,12 @@ def train_distributed(config):
                 loss.backward()
                 totals[0] += loss.detach().double()
                 totals[1] += batch["joint_mask"].double().sum()
+                for i, key in enumerate(("bc_sum", "moe_balance_sum", "moe_z_sum"), 2):
+                    totals[i] += details[key].double()
+                for layer, load in details["router_loads"].items():
+                    router_counts[layer] = router_counts.get(layer, 0) + load["tokens_per_expert"]
             dist.all_reduce(totals)
-            valid_count = float(totals[1])
+            load_metrics = router_load_metrics(router_counts, distributed=True)
             normalize_bc_gradients(params, coordinate_denominator(valid_count, world_size))
             grad = model.clip_grad_norm_(float(config.get("max_grad_norm", 1)))
             if not all_ranks_finite(grad, device):
@@ -320,15 +313,17 @@ def train_distributed(config):
             memories = [torch.empty_like(memory) for _ in range(world_size)]
             dist.all_gather(memories, memory)
             record = {"step": step, "loss": float(totals[0] / totals[1]), "grad_norm": float(grad),
+                      "bc_loss": float(totals[2] / valid_count), "moe_balance_loss": float(totals[3] / sample_count),
+                      "router_z_loss": float(totals[4] / sample_count),
+                      "router_loads": load_metrics,
                       "epoch": state["epoch"], "batch_offset": state["batch_offset"],
                       "valid_action_coordinates": valid_count, "lr": optimizer.param_groups[0]["lr"],
                       "step_seconds": update_seconds, "global_batch_size": global_batch,
                       "peak_gpu_gib": [float(value[0]) for value in memories],
                       "peak_reserved_gpu_gib": [float(value[1]) for value in memories]}
             if validation is not None and step % int(config.get("eval_every", 100)) == 0:
-                record["validation_bc_loss"] = validate_distributed(
-                    model, validation, device, batch_size=batch_size, max_batches=int(config.get("eval_batches", 8)),
-                    rank=rank, world_size=world_size)
+                record.update(validate_stratified(model, validation, device, batch_size=batch_size, samples=val_samples,
+                                                  rank=rank, world_size=world_size, frames_per_episode=val_frames))
             if step % int(config.get("save_every", 100)) == 0 or step == max_steps:
                 checkpoint_dir = output / "checkpoints" / f"global_step_{step}" / "distributed"
                 checkpoint_start = time.monotonic()
@@ -346,7 +341,8 @@ def train_distributed(config):
             export_start = time.monotonic()
             exported = export_distributed_hf(
                 model, policy, output / "checkpoints" / f"global_step_{state['global_step']}" / "hf_ckpt",
-                dtype=getattr(torch, config.get("export_dtype", "bfloat16")), processor=processor, rank=rank)
+                dtype=getattr(torch, config.get("export_dtype", "float32")), processor=processor, rank=rank,
+                base_checkpoint=base, expected_base_identity=base_identity, selection=selection)
             if rank == 0:
                 print(json.dumps({"exported_hf_ckpt": str(exported), "export_seconds": time.monotonic() - export_start}), flush=True)
         dist.barrier()

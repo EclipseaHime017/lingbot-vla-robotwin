@@ -102,8 +102,11 @@ def main(argv=None):
     parser.add_argument("--use_bf16", type=str2bool, default=True)
     parser.add_argument("--use_fp32", type=str2bool, default=False)
     parser.add_argument("--use_compile", type=str2bool, default=False)
+    parser.add_argument("--num_steps", type=int, default=10)
     args = parser.parse_args(argv)
     model = LingbotVLAv2Server(args.model_path, use_length=args.use_length, chunk_ret=args.chunk_ret,
                              use_bf16=args.use_bf16, use_fp32=args.use_fp32, use_compile=args.use_compile)
+    from .inference_profile import apply_inference_profile
+    apply_inference_profile(model, args.num_steps)
     from deploy.websocket_policy_server import WebsocketPolicyServer
     WebsocketPolicyServer(model, port=args.port).serve_forever()

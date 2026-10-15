@@ -11,6 +11,7 @@ from .data import TASKS
 
 ROBOTWIN_REVISION = "13c3c47ff4312dd62484bcd51be034af55c062d1"
 INSTRUCTIONS = {"demo_clean": "seen", "demo_randomized": "unseen"}
+EXPERT_SEED_POLICY = "bounded_advance_count_unstable_v2"
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 SUCCESS = re.compile(r"Success rate:\s*(\d+)\s*/\s*(\d+)\s*=>")
 
@@ -30,7 +31,8 @@ def adapt_eval_client(source: str, trials: int) -> str:
 
     The unmodified reference skips scenes indefinitely after failed expert runs.
     Tianchi rule §4.1 permits five starts and requires policy evaluation afterwards.
-    Retries here preserve the seed; every scene proceeds to the policy.
+    Failed expert starts advance the seed within that budget. The policy uses
+    the last attempted seed, including when all five expert starts fail.
     """
     if not 1 <= trials <= 100:
         raise ValueError("Expected 1..100 trials")
@@ -53,13 +55,15 @@ def adapt_eval_client(source: str, trials: int) -> str:
                 if not isinstance(episode_info, dict) or "info" not in episode_info:
                     episode_info = {"info": dict(getattr(TASK_ENV, "info", {}).get("info", {}))}
             except Exception as error:
-                print(f"Expert attempt {expert_attempt + 1}/5 failed; policy scene retained: {error}")
-                episode_info = {"info": dict(getattr(TASK_ENV, "info", {}).get("info", {}))}
+                print(f"Expert attempt {expert_attempt + 1}/5 failed: {error}")
+                episode_info = {"info": {}}
                 expert_success = False
             finally:
                 TASK_ENV.close_env()
             if expert_success:
                 break
+            if expert_attempt < 4:
+                now_seed += 1
         if not expert_success:
             print("Expert quota exhausted; evaluating policy on this scene")
         succ_seed += 1
@@ -67,6 +71,22 @@ def adapt_eval_client(source: str, trials: int) -> str:
 
 '''
     source = source[:start] + replacement + source[stop:]
+    policy_start = '        TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)\n        episode_info_list'
+    if source.count(policy_start) != 1:
+        raise ValueError("Upstream evaluation client changed: policy initialization anchor")
+    source = source.replace(policy_start, '''        try:
+            TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
+        except UnStableError as error:
+            # A scene that cannot initialize still consumes its policy trial.
+            print(f"Policy initialization failed; counted failure: scene={now_id}, seed={now_seed}, reason={error}")
+            now_id += 1
+            TASK_ENV.test_num += 1
+            TASK_ENV.close_env(clear_cache=((succ_seed + 1) % clear_cache_freq == 0))
+            print(f"Success rate: {TASK_ENV.suc}/{TASK_ENV.test_num} => "
+                  f"{100 * TASK_ENV.suc / TASK_ENV.test_num:.1f}%, current seed: {now_seed}")
+            now_seed += 1
+            continue
+        episode_info_list''', 1)
     # Use metadata from the fresh policy scene if expert exceptions left it empty.
     source = source.replace('        episode_info_list = [episode_info["info"]]',
                             '''        scene_info = episode_info["info"] or getattr(TASK_ENV, "info", {}).get("info", {})
@@ -120,11 +140,19 @@ def evaluation_task_complete(run: Path, setting: str, task: str, trials: int) ->
 
 def aggregate_results(run: Path, tasks: list[str], settings: list[str], precision: str, trials: int = 100,
                       inference_backend: str = "native", task_runs: dict[str, Path] | None = None,
-                      use_length: int = 50) -> dict:
+                      use_length: int = 50, expert_seed_policy: str | None = None,
+                      inference_profile: dict | None = None) -> dict:
+    plan_file = run / "evaluation_plan.json"
+    if expert_seed_policy is None and plan_file.is_file():
+        expert_seed_policy = json.loads(plan_file.read_text()).get("expert_seed_policy")
+    profile = inference_profile if inference_profile is not None else (json.loads(plan_file.read_text()) if plan_file.is_file() else {})
     result = {"schema": "lrvla-evaluation-v1", "official_submission_template_verified": True,
               "precision": precision, "release_fp32_precision": precision == "fp32",
               "inference_backend": inference_backend, "release_kernel_equivalence_verified": inference_backend == "native",
-              "robotwin_revision": ROBOTWIN_REVISION, "trials_per_task": trials, "use_length": use_length, "settings": {},
+              "robotwin_revision": ROBOTWIN_REVISION, "trials_per_task": trials, "use_length": use_length,
+              "expert_seed_policy": expert_seed_policy, "settings": {},
+              "num_steps": profile.get("num_steps"), "compile": profile.get("compile"),
+              "action_smoothing": profile.get("action_smoothing"),
               "full_50_task_benchmark": set(tasks) == set(TASKS) and len(tasks) == 50 and trials == 100 and set(settings) == set(INSTRUCTIONS)}
     for setting in settings:
         rows = []
@@ -146,7 +174,9 @@ def aggregate_results(run: Path, tasks: list[str], settings: list[str], precisio
                                        "complete": complete, "benchmark_success_rate": successes / total if complete and total else None}
     result["complete"] = all(setting["complete"] for setting in result["settings"].values())
     result["comparable_to_release"] = (result["complete"] and result["full_50_task_benchmark"]
-                                       and precision == "fp32" and inference_backend == "native" and use_length == 50)
+                                       and precision == "fp32" and inference_backend == "native" and use_length == 50
+                                       and profile.get("num_steps") == 10 and profile.get("compile") is False
+                                       and profile.get("action_smoothing") == "none")
     result["status"] = "completed" if result["complete"] else "incomplete"
     (run / "results.json").write_text(json.dumps(result, indent=2) + "\n")
     return result

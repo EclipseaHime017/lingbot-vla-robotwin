@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import math
-import re
-from dataclasses import dataclass
 
 import torch
 from torch import nn
@@ -178,7 +176,74 @@ def normalize_bc_gradients(parameters, valid_count):
             parameter.grad.div_(valid_count)
 
 
-def flow_matching_bc(model, batch, *, reduction="mean"):
+def configure_moe_loss(model, config):
+    values = {key: float(config.get(key, getattr(model.config, key, default))) for key, default in
+              (("sequence_wise_loss_coeff", 1e-3), ("router_z_loss_coeff", 1e-4))}
+    if any(not math.isfinite(value) or value < 0 for value in values.values()):
+        raise ValueError("MoE loss coefficients must be finite and nonnegative.")
+    if getattr(model.config, "sequence_wise_mode", "per_sequence") != "per_sequence":
+        raise ValueError("Resumable BC supports per_sequence MoE balance only.")
+    for key, value in values.items():
+        setattr(model.config, key, value)
+        setattr(model.model.config, key, value)
+    return {**values, "normalization": "sample_mean_v1", "sequence_wise_mode": "per_sequence",
+            "router_activation": getattr(model.config, "router_activation", "sigmoid"),
+            "token_top_k": getattr(model.config, "token_top_k", 4)}
+
+
+def moe_auxiliary_losses(router_logits, batch_size, *, top_k=4, score_func="sigmoid"):
+    """Per-sample official sequence balance/z-loss; counts have no gradient."""
+    balances, zs, loads = [], [], {}
+    for layer, logits in enumerate(router_logits):
+        if logits.ndim != 2 or logits.shape[0] % batch_size:
+            raise ValueError("Router logits must contain equally sized per-sample suffixes.")
+        values = logits.float().reshape(batch_size, -1, logits.shape[-1])
+        _, tokens, experts = values.shape
+        if not 1 <= top_k <= experts:
+            raise ValueError("Invalid MoE top_k.")
+        if score_func == "sigmoid":
+            scores = values.sigmoid()
+            probs = scores / scores.sum(-1, keepdim=True).clamp_min(torch.finfo(scores.dtype).tiny)
+        elif score_func == "softmax":
+            probs = values.softmax(-1)
+        else:
+            raise ValueError(f"Unsupported router activation: {score_func}")
+        with torch.no_grad():
+            selected = values.topk(top_k, dim=-1).indices.reshape(batch_size, -1)
+            counts = values.new_zeros((batch_size, experts)).scatter_add_(
+                1, selected, values.new_ones(selected.shape))
+            frequency = counts * (experts / (top_k * tokens))
+            total = counts.sum(0)
+            distribution = total / total.sum()
+            loads[f"layer_{layer}"] = {"tokens_per_expert": total.detach(),
+                                        "max_mean_load": (total.max() / total.mean()).detach(),
+                                        "entropy": (-(distribution * distribution.clamp_min(1e-30).log()).sum()).detach()}
+        balances.append((frequency * probs.mean(1)).sum(-1))
+        zs.append(values.logsumexp(-1).square().mean(-1))
+    if not balances:
+        return None, None, {}
+    return torch.stack(balances).mean(0), torch.stack(zs).mean(0), loads
+
+
+def router_load_metrics(counts, *, distributed=False):
+    if not counts:
+        return {}
+    names = sorted(counts)
+    totals = torch.stack([counts[name] for name in names])
+    if distributed:
+        import torch.distributed as dist
+        dist.all_reduce(totals)
+    result = {}
+    for name, total in zip(names, totals):
+        probability = total / total.sum()
+        result[name] = {"tokens_per_expert": total.cpu().tolist(),
+                        "max_mean_load": float(total.max() / total.mean()),
+                        "entropy": float(-(probability * probability.clamp_min(1e-30).log()).sum())}
+    return result
+
+
+def flow_matching_bc(model, batch, *, reduction="mean", auxiliary_scale=None,
+                     noise=None, time=None, return_details=False):
     """Use official embedding/transformer modules, supervising clean action chunks.
 
     Query embeddings and alignment heads remain in the architecture and export;
@@ -186,8 +251,10 @@ def flow_matching_bc(model, batch, *, reduction="mean"):
     """
     flow = model.model
     actions, state = batch["actions"].float(), batch["state"].float()
-    noise = torch.randn_like(actions)
-    time = flow.sample_time(actions.shape[0], actions.device).float()
+    noise = torch.randn_like(actions) if noise is None else noise.to(actions.device, dtype=torch.float32)
+    time = flow.sample_time(actions.shape[0], actions.device).float() if time is None else time.to(actions.device).float()
+    if noise.shape != actions.shape or time.shape != (len(actions),):
+        raise ValueError("Explicit flow noise/time shapes differ from the action batch.")
     x_t = time[:, None, None] * noise + (1 - time[:, None, None]) * actions
     with torch.no_grad():
         prefix, prefix_pad, prefix_ar, prefix_pos, visual_mask, deepstack = flow.embed_prefix(
@@ -220,6 +287,33 @@ def flow_matching_bc(model, batch, *, reduction="mean"):
         ada_cond=time_emb if getattr(flow.config, "adanorm_time", False) else None)
     suffix_out = outputs[1][:, -flow.config.n_action_steps:]
     prediction = flow._fp32_linear(flow.action_out_proj, suffix_out)
-    loss = masked_bc_loss(prediction, noise - actions, batch["joint_mask"], flow.config.loss_type,
-                          reduction=reduction)
-    return loss
+    if prediction.ndim != 3 or prediction.shape != actions.shape or batch["joint_mask"].shape != actions.shape:
+        raise ValueError("Prediction, target and joint_mask must have identical [B,T,D] shapes.")
+    mask = batch["joint_mask"].float()
+    error = prediction.float() - (noise - actions)
+    if flow.config.loss_type == "L1_fm":
+        error = error.abs()
+    elif flow.config.loss_type == "fm":
+        error = error.square()
+    else:
+        raise ValueError(f"Unsupported BC flow-matching loss: {flow.config.loss_type}")
+    bc_samples = (error * mask).flatten(1).sum(1)
+    counts = mask.flatten(1).sum(1)
+    if counts.sum() <= 0:
+        raise ValueError("Batch has no valid action dimensions.")
+    balance, z, loads = moe_auxiliary_losses(
+        router_logits, len(actions), top_k=getattr(flow.config, "token_top_k", 4),
+        score_func=getattr(flow.config, "router_activation", "sigmoid"))
+    zero = bc_samples.new_zeros(len(actions))
+    balance = zero if balance is None else balance * getattr(flow.config, "sequence_wise_loss_coeff", 0)
+    z = zero if z is None else z * getattr(flow.config, "router_z_loss_coeff", 0)
+    scale = counts.sum() / len(actions) if auxiliary_scale is None else auxiliary_scale
+    numerator = bc_samples.sum() + scale * (balance.sum() + z.sum())
+    if reduction not in {"mean", "sum"}:
+        raise ValueError(f"Unsupported BC loss reduction: {reduction}")
+    loss = numerator if reduction == "sum" else numerator / counts.sum()
+    if not return_details:
+        return loss
+    return loss, {"per_sample_bc_sum": bc_samples.detach(), "per_sample_valid_coordinates": counts.detach(),
+                  "bc_sum": bc_samples.detach().sum(), "moe_balance_sum": balance.detach().sum(),
+                  "moe_z_sum": z.detach().sum(), "router_loads": loads}

@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 import ast
 import json
 import importlib.util
@@ -11,9 +12,9 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from lrvla.evaluation import adapt_eval_client, aggregate_results, export_official_results, parse_success_counts
+from lrvla.evaluation import EXPERT_SEED_POLICY, adapt_eval_client, aggregate_results, export_official_results, parse_success_counts
 from lrvla.data import TASKS
-from lrvla.scene_metadata import object_expressions, recover_scene_info
+from lrvla.scene_metadata import object_expressions
 
 spec = importlib.util.spec_from_file_location("lrvla_evaluate_cli", ROOT / "scripts/evaluate.py")
 evaluate = importlib.util.module_from_spec(spec)
@@ -62,6 +63,7 @@ class EvaluationTests(unittest.TestCase):
                 launch.assert_not_called()
                 plan = json.loads((run / "evaluation_plan.json").read_text())
                 self.assertNotIn("checkpoint_identity", plan)
+                self.assertEqual(plan["expert_seed_policy"], EXPERT_SEED_POLICY)
                 self.assertEqual(plan["inference_command"][0], str(root / "moved-miniconda/envs/lingbot-vla/bin/python"))
                 self.assertEqual(plan["evaluation_commands"][0]["command"][0], str(root / "moved-miniconda/envs/robotwin-sim/bin/python"))
                 sim_environment = probe.call_args.kwargs["env"]
@@ -108,7 +110,18 @@ class EvaluationTests(unittest.TestCase):
             self.assertEqual(set(payload), {"schema_version", "team_id", "results"})
             self.assertEqual(len(payload["results"]["clean"]), 50)
 
-    def test_expert_failure_retains_scene_after_five_attempts(self):
+    def test_resume_rejects_changed_expert_seed_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            for previous in ({}, {"expert_seed_policy": "same_seed"}):
+                with self.subTest(previous=previous):
+                    (run / "evaluation_plan.json").write_text(json.dumps(previous))
+                    with self.assertRaisesRegex(ValueError, "expert_seed_policy"):
+                        evaluate.prepare_resumed_plan(run, {"expert_seed_policy": EXPERT_SEED_POLICY})
+                    report = aggregate_results(run, ["adjust_bottle"], ["demo_clean"], "fp32", trials=2)
+                    self.assertEqual(report["expert_seed_policy"], previous.get("expert_seed_policy"))
+
+    def test_expert_retry_budget_and_policy_seed(self):
         source = adapt_eval_client((ROOT / "vendor/lingbot-vla-v2/experiment/robotwin/eval_policy_client_lingbotvla.py").read_text(), 1)
         tree = ast.parse(source)
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "eval_policy")
@@ -127,6 +140,8 @@ class EvaluationTests(unittest.TestCase):
                 self.render_freq = 0
             def setup_demo(self, **kwargs):
                 self.seeds.append(kwargs["seed"])
+                self.take_action_cnt = 0
+                self.info = {"info": {}}
             def play_once(self):
                 self.expert_starts += 1
                 raise RuntimeError("expert planning failed")
@@ -157,18 +172,92 @@ class EvaluationTests(unittest.TestCase):
         # The runtime puts this pure stdlib helper next to the generated client.
         import lrvla.scene_metadata as helper
         sys.modules["scene_metadata"] = helper
+        class UnStableError(Exception):
+            pass
         scope = {"np": NP(), "os": __import__("os"), "Path": Path,
-                 "parent_directory": str(ROOT / "vendor/RoboTwin/script"), "generate_episode_descriptions": generate}
+                 "parent_directory": str(ROOT / "vendor/RoboTwin/script"), "generate_episode_descriptions": generate,
+                 "UnStableError": UnStableError}
         exec(compile(ast.Module(body=[function], type_ignores=[]), "adapted_client", "exec"), scope)
-        env = Environment()
         args = {"task_name": "adjust_bottle", "policy_name": "lingbot", "clear_cache_freq": 5, "render_freq": 0,
                 "task_config": "demo_clean", "ckpt_setting": "cotrain"}
-        scope["eval_policy"]("adjust_bottle", env, args, Policy(), 100000, test_num=1, instruction_type="seen", usr_args={"robo_name": "robotwin"})
-        self.assertEqual(env.expert_starts, 5)
-        self.assertEqual(env.policy_actions, 1)
-        self.assertEqual(env.test_num, 1)
-        self.assertEqual(env.suc, 1)
-        self.assertEqual(set(env.seeds), {100000})
+        def run(env, trials=1):
+            return scope["eval_policy"]("adjust_bottle", env, args.copy(), Policy(), 100000,
+                                        test_num=trials, instruction_type="seen", usr_args={"robo_name": "robotwin"})
+
+        with self.subTest("exhausted budget across two scenes"):
+            env = Environment()
+            run(env, trials=2)
+            self.assertEqual(env.expert_starts, 10)
+            self.assertEqual(env.policy_actions, 2)
+            self.assertEqual(env.test_num, 2)
+            self.assertEqual(env.suc, 2)
+            self.assertEqual(env.seeds, [100000, 100001, 100002, 100003, 100004, 100004,
+                                         100005, 100006, 100007, 100008, 100009, 100009])
+
+        class InitiallyUnstable(Environment):
+            def setup_demo(self, **kwargs):
+                super().setup_demo(**kwargs)
+                if len(self.seeds) <= 2:
+                    raise RuntimeError("objects unstable")
+            def play_once(self):
+                self.expert_starts += 1
+                self.plan_success = True
+                return {"info": {"{A}": "001_bottle/base13"}}
+            def check_success(self):
+                return True
+
+        with self.subTest("initialization failures consume expert starts"):
+            env = InitiallyUnstable()
+            run(env)
+            self.assertEqual(env.seeds, [100000, 100001, 100002, 100002])
+            self.assertEqual(env.expert_starts, 1)
+            self.assertEqual(env.policy_actions, 1)
+            self.assertEqual(env.test_num, 1)
+
+        class InvalidPolicyScene(Environment):
+            def setup_demo(self, **kwargs):
+                super().setup_demo(**kwargs)
+                if len(self.seeds) == 6:
+                    raise RuntimeError("policy scene initialization failed")
+
+        with self.subTest("invalid policy scene remains an error"):
+            env = InvalidPolicyScene()
+            with self.assertRaisesRegex(RuntimeError, "policy scene initialization failed"):
+                run(env)
+            self.assertEqual(env.expert_starts, 5)
+            self.assertEqual(env.policy_actions, 0)
+            self.assertEqual(env.test_num, 0)
+            self.assertEqual(env.seeds[-2:], [100004, 100004])
+
+        class UnstablePolicyScene(Environment):
+            def setup_demo(self, **kwargs):
+                super().setup_demo(**kwargs)
+                raise UnStableError("objects unstable")
+
+        with self.subTest("unstable scenes are counted without policy actions"):
+            import contextlib
+            import io
+            env = UnstablePolicyScene()
+            log = io.StringIO()
+            with contextlib.redirect_stdout(log):
+                run(env, trials=2)
+            self.assertEqual(len(env.seeds), 12)
+            self.assertEqual(env.policy_actions, 0)
+            self.assertEqual((env.suc, env.test_num), (0, 2))
+            self.assertIn("Success rate: 0/2", log.getvalue())
+            self.assertEqual(log.getvalue().count("counted failure:"), 2)
+
+        class FirstPolicyUnstable(Environment):
+            def setup_demo(self, **kwargs):
+                super().setup_demo(**kwargs)
+                if len(self.seeds) == 6:
+                    raise UnStableError("first policy scene unstable")
+
+        with self.subTest("next scene still performs RGB inference"):
+            env = FirstPolicyUnstable()
+            run(env, trials=2)
+            self.assertEqual((env.suc, env.test_num, env.policy_actions), (1, 2, 1))
+            self.assertEqual(env.seeds[6], env.seeds[5] + 1)
 
 
 if __name__ == "__main__":
