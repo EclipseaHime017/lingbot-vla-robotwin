@@ -1,0 +1,26 @@
+# Diagnostic proxy: 12 tasks x 2 settings x 20 scenes = 480 scenes.
+# Four simulators per GPU are an opt-in target requiring a VRAM/throughput check.
+tasks:
+  - adjust_bottle
+  - click_bell
+  - place_a2b_left
+  - place_a2b_right
+  - shake_bottle
+  - shake_bottle_horizontally
+  - stack_blocks_three
+  - blocks_ranking_rgb
+  - put_bottles_dustbin
+  - open_microwave
+  - hanging_mug
+  - stamp_seal
+settings: [demo_clean, demo_randomized]
+trials: 20
+backend: native
+precision: fp32
+use_length: 50
+num_steps: 10
+compile: false
+action_smoothing: none
+sim_workers: 4
+policy_rng: scene
+expert_cache_mode: "off"

@@ -337,6 +337,42 @@ bash eval.sh --checkpoint runs/expert_full_clean/checkpoints/global_step_10000/h
 
 这会运行 50 × 2 × 100 个场景，使用原生 FP32 推理，需要相应显存和仿真环境。结果写入输出目录的 `results.json`；添加 `--skip-completed` 可保留已完成任务，重新运行失败任务，并校验模型权重与评测协议一致。
 
+多 GPU 入口按任务长度分组，每张卡加载一份模型服务，用多个独立仿真进程并行运行不同的“任务 × 环境设定”。[configs/eval_parallel.yaml](configs/eval_parallel.yaml) 覆盖全部 10,000 场景，默认每卡两路仿真；[configs/eval_proxy.yaml](configs/eval_proxy.yaml) 覆盖 12 个任务、两种设定、各 20 场景，共 480 场景，配置为每卡四路。代理结果用于模型筛选，完整结果仍需运行全部任务。
+
+```bash
+# 仅生成分组与参数清单，不加载模型或启动仿真
+python scripts/evaluate_parallel.py --config configs/eval_proxy.yaml \
+  --checkpoint runs/expert_full_clean/checkpoints/global_step_10000/hf_ckpt \
+  --gpus 0,1,2,3 --sim-workers 2 \
+  --output runs/evaluation/proxy-two-sims --prepare-only
+
+# 在已分配 GPU 的计算环境中运行，并复用完成的任务及环境组合
+python scripts/evaluate_parallel.py \
+  --workflow runs/evaluation/proxy-two-sims/workflow.json --gpus 0,1,2,3
+```
+
+省略 `--gpus` 时读取 `CUDA_VISIBLE_DEVICES`；已有设备分配时只能从中选择。入口将 CUDA 与 Vulkan 绑定到同一物理 GPU，每卡使用独立推理端口和输出目录。单卡也可用 `bash eval.sh ... --sim-workers 2 --policy-rng scene` 共享服务。每个任务仍按原顺序推进 seed，不将同一任务简单切成重复的 seed 段。仿真进程的 BLAS/OMP 线程数限制为 1；同卡的推理请求串行处理，CPU 仿真并行。
+
+共享模式固定 `robotwin` 配置、整段动作返回和无动作平滑，禁止客户端切换模型。`scene` 随机协议按任务、设定和最终场景 seed 生成模型噪声种子，各连接独立保存 Torch CPU/CUDA 随机流，避免请求交错改变某场景的随机序列。该协议及缓存模式进入恢复校验，使用新的输出目录，不与旧的全局随机流结果混合。推理去噪步数和动作执行长度保持 YAML 中的配置。
+
+每组目录保存 `results.json`，根目录汇总为全部分组的 `results.json`；只有日志场景数完整、客户端成功退出、模型身份和协议匹配才标记完成。`workers/parallel_status.json` 记录进程退出状态。每回合输出 `LRVLA_EPISODE_METRICS`，区分专家预跑、策略初始化、语言生成、取观测、推理 RPC 和动作执行耗时；多仿真时 `resource_usage.jsonl` 每五秒记录 GPU 利用率和显存，采样值可能漏过短时峰值。
+
+每卡两路、四路的显存及吞吐需要在目标硬件上实测；单服务加一套仿真的占用不能直接推算额外三套仿真一定能容纳。先用 `--sim-workers 2`，测量后在新输出目录尝试 `4`。运行时间也取决于任务长度、共享服务等待和任务尾部，代理规模不保证在固定时限内完成。
+
+可选的专家缓存目前提供实验性 `record/replay`，默认关闭。准备 workflow 时添加：
+
+```bash
+# 首次正常执行专家预检并记录；其余参数同上，使用新的输出目录
+--expert-cache runs/evaluation/scene-bank --expert-cache-mode record
+
+# 后续 checkpoint 在独立输出目录中重放同一组场景
+--expert-cache runs/evaluation/scene-bank --expert-cache-mode replay
+```
+
+缓存保留每场景最多五次尝试、所有失败预算耗尽的场景、最终 seed 和完整专家物体／手臂描述。重放保留策略初始化、稳定性检查和完整 RGB 闭环，恢复 Python 指令生成状态，再执行原指令生成与 NumPy 抽样，并核对指令和首次官方 RGB／关节观测；不缓存模型动作或策略成功结果。身份包含任务、设定、场景数、起始 seed、协议、源码／配置摘要、仿真依赖版本及资产清单。小型物理和机器人配置按内容哈希，网格／纹理由大小和修改时间识别，后者不是完整内容校验。20 场景与 100 场景使用不同指令生成数量，缓存分别保存。
+
+缓存首次构建仍需专家预跑；部分记录不支持续写，未完成时使用新缓存目录。重放尚需在目标仿真环境中完成真实渲染对照验证，因此其结果不会标记为可直接与完整基线比较。模型选择可以复用验证过的缓存，正式全量评测默认保持缓存关闭。
+
 闭环客户端适配位于 [src/lrvla/evaluation.py](src/lrvla/evaluation.py)，运行时生成客户端副本，不修改上游文件：场景数参数化；移除未使用的 `get_model` 查找；每场景最多五次专家启动，失败后推进 seed，策略使用最后一次 seed；策略初始化的 `UnStableError` 计为一次失败并继续，其他错误仍终止。初始化失败也可能导致零次模型调用，环境预检还需检查真实 RGB 推理和动作日志。
 
 专家元数据缺失时由 [src/lrvla/scene_metadata.py](src/lrvla/scene_metadata.py) 恢复场景物体描述，再使用原始指令模板。客户端以 `check_success()` 判断成功；上游 `take_action` 也在插值子步调用该函数，成功时设置 `eval_success` 并返回。客户端移除按任务切换权重的路径，全程使用同一 checkpoint。原生服务保留上游模型和内核，仅将配置的去噪步数设置到实际采样模型；后端、精度、去噪步数、执行长度、compile 和平滑均进入结果及恢复校验。新旧客户端协议使用不同输出目录。

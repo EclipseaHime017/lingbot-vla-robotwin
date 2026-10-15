@@ -105,17 +105,24 @@ def adapt_eval_client(source: str, trials: int) -> str:
     return source
 
 
-def create_eval_runtime(vendor: Path, robotwin: Path, destination: Path, trials: int) -> Path:
+def create_eval_runtime(vendor: Path, robotwin: Path, destination: Path, trials: int, *,
+                        scene_rng=False, expert_cache=False, timing=False) -> Path:
     """Generate a client copy outside both tracked upstream trees."""
     script_dir = destination / "script"
     deploy = script_dir / "deploy"
     deploy.mkdir(parents=True, exist_ok=True)
     (script_dir / "__init__.py").write_text("")
     client = script_dir / "eval_policy_client_lingbotvla.py"
-    client.write_text(adapt_eval_client((vendor / "experiment/robotwin/eval_policy_client_lingbotvla.py").read_text(), trials))
+    from .evaluation_runtime import add_runtime_features
+    source = adapt_eval_client((vendor / "experiment/robotwin/eval_policy_client_lingbotvla.py").read_text(), trials)
+    source = add_runtime_features(source, scene_rng=scene_rng, expert_cache=expert_cache, timing=timing)
+    client.write_text('import os\nif os.environ.get("LRVLA_RENDER_PCI"):\n'
+                      '    from render_device import bind_render_device\n    bind_render_device()\n' + source)
     for filename in ("__init__.py", "websocket_client_policy.py", "msgpack_numpy.py"):
         shutil.copy2(vendor / "deploy" / filename, deploy / filename)
     shutil.copy2(Path(__file__).with_name("scene_metadata.py"), script_dir / "scene_metadata.py")
+    for helper in ("scene_bank.py", "policy_sessions.py", "episode_metrics.py", "render_device.py"):
+        shutil.copy2(Path(__file__).with_name(helper), script_dir / helper)
     config = destination / "task_config"
     if config.is_symlink() and config.resolve() != robotwin.resolve() / "task_config":
         config.unlink()
@@ -153,6 +160,10 @@ def aggregate_results(run: Path, tasks: list[str], settings: list[str], precisio
               "expert_seed_policy": expert_seed_policy, "settings": {},
               "num_steps": profile.get("num_steps"), "compile": profile.get("compile"),
               "action_smoothing": profile.get("action_smoothing"),
+              "policy_rng": profile.get("policy_rng"), "sim_workers": profile.get("sim_workers", 1),
+              "policy_rng_protocol": profile.get("policy_rng_protocol"),
+              "expert_cache_mode": profile.get("expert_cache_mode", "off"),
+              "expert_cache_replay_verified": False,
               "full_50_task_benchmark": set(tasks) == set(TASKS) and len(tasks) == 50 and trials == 100 and set(settings) == set(INSTRUCTIONS)}
     for setting in settings:
         rows = []
@@ -177,6 +188,8 @@ def aggregate_results(run: Path, tasks: list[str], settings: list[str], precisio
                                        and precision == "fp32" and inference_backend == "native" and use_length == 50
                                        and profile.get("num_steps") == 10 and profile.get("compile") is False
                                        and profile.get("action_smoothing") == "none")
+    if profile.get("expert_cache_mode") == "replay":
+        result["comparable_to_release"] = False
     result["status"] = "completed" if result["complete"] else "incomplete"
     (run / "results.json").write_text(json.dumps(result, indent=2) + "\n")
     return result

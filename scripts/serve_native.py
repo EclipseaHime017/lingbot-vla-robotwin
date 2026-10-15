@@ -14,7 +14,7 @@ from lrvla.inference_profile import apply_inference_profile  # noqa: E402
 
 def main():
     from deploy.lingbot_vla_v2_policy import LingbotVLAv2Server, str2bool
-    from deploy.websocket_policy_server import WebsocketPolicyServer
+    from lrvla.policy_sessions import policy_server
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--port", type=int, default=9330)
@@ -23,13 +23,14 @@ def main():
     parser.add_argument("--use_bf16", type=str2bool, default=False)
     parser.add_argument("--use_fp32", type=str2bool, default=True)
     parser.add_argument("--use_compile", type=str2bool, default=False)
+    parser.add_argument("--policy-rng", choices=["legacy", "scene"], default="legacy")
     args = parser.parse_args()
     if args.use_bf16 == args.use_fp32 or args.num_steps <= 0 or args.use_length <= 0:
         parser.error("Select one precision and positive use_length/num_steps.")
     policy = LingbotVLAv2Server(args.model_path, use_length=args.use_length, chunk_ret=True,
                                use_bf16=args.use_bf16, use_fp32=args.use_fp32, use_compile=args.use_compile)
     apply_inference_profile(policy, args.num_steps)
-    WebsocketPolicyServer(policy, port=args.port).serve_forever()
+    policy_server(policy, args.port, scene_rng=args.policy_rng == "scene").serve_forever()
 
 
 if __name__ == "__main__":

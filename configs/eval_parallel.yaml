@@ -1,0 +1,13 @@
+tasks: all
+settings: [demo_clean, demo_randomized]
+trials: 100
+backend: native
+precision: fp32
+use_length: 50
+num_steps: 10
+compile: false
+action_smoothing: none
+# Measure 2 simulators/GPU before increasing to 4 on a 40 GB device.
+sim_workers: 2
+policy_rng: scene
+expert_cache_mode: "off"

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ import time
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+RENDER_BINDING = True
 sys.path.insert(0, str(ROOT / "src"))
 from lrvla.data import parse_tasks
 from lrvla.evaluation import (
@@ -27,6 +29,8 @@ from lrvla.evaluation import (
     evaluation_task_complete, export_official_results,
 )
 from lrvla.training_identity import base_checkpoint_identity
+from lrvla.simulation_workers import run_clients
+from lrvla.policy_sessions import POLICY_RNG
 from lrvla.vendor_sources import upstream_revision
 from lrvla.wsl_tools import linux_executable
 
@@ -37,11 +41,17 @@ def default_conda() -> Path:
 
 def stop(process):
     if process and process.poll() is None:
-        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
         try:
             process.wait(timeout=20)
         except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             process.wait()
 
 
@@ -53,9 +63,12 @@ def prepare_resumed_plan(run, plan):
             raise ValueError("Existing evaluation logs have no fixed-checkpoint plan; use a new output directory.")
         return None
     previous = json.loads(existing.read_text())
+    legacy_defaults = {"policy_rng": "legacy", "policy_rng_protocol": "process_global_torch_legacy",
+                       "expert_cache_mode": "off", "expert_cache_identity": None}
     for key in ("checkpoint", "precision", "trials", "tasks", "settings", "inference_backend", "use_length",
-                "num_steps", "compile", "action_smoothing", "expert_seed_policy"):
-        if previous.get(key) != plan.get(key):
+                "num_steps", "compile", "action_smoothing", "expert_seed_policy", "policy_rng",
+                "expert_cache_mode", "expert_cache_identity", "policy_rng_protocol"):
+        if previous.get(key, legacy_defaults.get(key)) != plan.get(key, legacy_defaults.get(key)):
             raise ValueError(f"Evaluation resume mismatch for {key}; use the same checkpoint and protocol.")
     if previous.get("checkpoint_identity") is None and any(run.glob("*/eval_logs/*.log")):
         raise ValueError("Existing evaluation logs lack an attested checkpoint identity; use a new output directory.")
@@ -78,12 +91,13 @@ def parse_args(argv=None):
     initial.add_argument("--config", type=Path, default=ROOT / "configs/eval.yaml")
     config_args, _ = initial.parse_known_args(argv)
     profile = yaml.safe_load(config_args.config.read_text())
-    allowed = {"backend", "precision", "use_length", "num_steps", "compile", "action_smoothing"}
+    allowed = {"backend", "precision", "use_length", "num_steps", "compile", "action_smoothing",
+               "sim_workers", "policy_rng", "expert_cache", "expert_cache_mode"}
     if not isinstance(profile, dict) or set(profile) - allowed:
         raise ValueError("Unknown evaluation YAML fields; expected inference profile settings.")
     if "compile" in profile and type(profile["compile"]) is not bool:
         raise ValueError("Evaluation compile must be a YAML boolean.")
-    for key in ("num_steps", "use_length"):
+    for key in ("num_steps", "use_length", "sim_workers"):
         if key in profile and type(profile[key]) is not int:
             raise ValueError(f"Evaluation {key} must be a YAML integer.")
     parser = argparse.ArgumentParser(description=__doc__)
@@ -106,6 +120,10 @@ def parse_args(argv=None):
     parser.add_argument("--num-steps", type=int, default=10)
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--action-smoothing", choices=["none"], default="none")
+    parser.add_argument("--sim-workers", type=int, default=1, help="Independent task/setting clients sharing this server")
+    parser.add_argument("--policy-rng", choices=["legacy", "scene"], default=None)
+    parser.add_argument("--expert-cache", type=Path)
+    parser.add_argument("--expert-cache-mode", choices=["off", "record", "replay"], default="off")
     parser.add_argument("--video", action="store_true")
     parser.add_argument("--backend", choices=["native", "streamed"], default="native")
     parser.add_argument("--native-server", dest="backend", action="store_const", const="native", help="Alias for --backend native")
@@ -120,6 +138,15 @@ def parse_args(argv=None):
         parser.error("Invalid backend or precision in evaluation config")
     if args.action_smoothing != "none" or args.num_steps <= 0 or not 1 <= args.use_length <= 50:
         parser.error("Expected positive num_steps, use_length 1..50, action_smoothing none")
+    if not 1 <= args.sim_workers <= 16:
+        parser.error("sim_workers must be 1..16")
+    args.policy_rng = args.policy_rng or ("scene" if args.sim_workers > 1 else "legacy")
+    if args.policy_rng not in {"scene", "legacy"} or (args.sim_workers > 1 and args.policy_rng != "scene"):
+        parser.error("Multiple simulators require policy_rng: scene")
+    if args.expert_cache_mode not in {"off", "record", "replay"}:
+        parser.error("Unknown expert_cache_mode")
+    if args.expert_cache_mode != "off" and args.expert_cache is None:
+        parser.error("record/replay requires --expert-cache")
     return args
 
 
@@ -144,6 +171,9 @@ def main():
         profile = {"precision": args.precision, "inference_backend": backend, "use_length": args.use_length,
                    "num_steps": args.num_steps, "compile": args.compile, "action_smoothing": args.action_smoothing,
                    "expert_seed_policy": EXPERT_SEED_POLICY, "trials": args.trials, "tasks": tasks, "settings": settings,
+                   "policy_rng": args.policy_rng, "expert_cache_mode": args.expert_cache_mode,
+                   "policy_rng_protocol": POLICY_RNG if args.policy_rng == "scene" else "process_global_torch_legacy",
+                   "expert_cache_identity": previous.get("expert_cache_identity"),
                    "checkpoint": str(args.checkpoint.resolve())}
         prepare_resumed_plan(run, profile)
         if base_checkpoint_identity(args.checkpoint.resolve()) != previous.get("checkpoint_identity"):
@@ -160,21 +190,39 @@ def main():
     conda_root = conda_path.parent.parent
     infer_python = linux_executable("python", preferred=conda_root / "envs" / args.inference_env / "bin/python")
     sim_python = linux_executable("python", preferred=conda_root / "envs" / args.sim_env / "bin/python")
-    client = create_eval_runtime(vendor, robotwin, run / "runtime", args.trials)
+    client = create_eval_runtime(vendor, robotwin, run / "runtime", args.trials,
+                                 scene_rng=args.policy_rng == "scene", expert_cache=args.expert_cache_mode != "off", timing=True)
     shared_environment = dict(os.environ, CUDA_VISIBLE_DEVICES=args.gpu, QWEN3VL_PATH=str(args.qwen.resolve()), PYTHONNOUSERSITE="1",
                               PYTHONUNBUFFERED="1", SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0", TOKENIZERS_PARALLELISM="false")
     shared_environment["PYTHONPATH"] = os.pathsep.join([str(run / "runtime"), str(vendor), str(robotwin), str(robotwin / "description/utils")])
+    if args.sim_workers > 1 and not args.dry_run and not shared_environment.get("LRVLA_RENDER_PCI"):
+        from lrvla.parallel_evaluation import assigned_devices
+        device, = assigned_devices(args.gpu)
+        args.gpu = device["uuid"]
+        shared_environment.update(CUDA_VISIBLE_DEVICES=args.gpu, LRVLA_RENDER_PCI=device["pci"])
+    cache_identity = None
+    if args.expert_cache_mode != "off":
+        from lrvla.scene_bank import source_identity
+        cache_identity = {**source_identity(robotwin), "expert_seed_policy": EXPERT_SEED_POLICY,
+                          "upstream_client_sha256": hashlib.sha256((vendor / "experiment/robotwin/eval_policy_client_lingbotvla.py").read_bytes()).hexdigest()}
+        shared_environment.update(LRVLA_EXPERT_CACHE=str(args.expert_cache.resolve()),
+                                  LRVLA_EXPERT_CACHE_MODE=args.expert_cache_mode,
+                                  LRVLA_EXPERT_CACHE_IDENTITY=json.dumps(cache_identity))
     env = dict(shared_environment)
     env["PATH"] = os.pathsep.join(filter(None, [str(infer_python.parent), shared_environment.get("PATH", "")]))
     env["LD_LIBRARY_PATH"] = os.pathsep.join(filter(None, [str(conda_root / "envs" / args.inference_env / "lib"), shared_environment.get("LD_LIBRARY_PATH", "")]))
     sim_environment = dict(shared_environment)
     sim_environment["PATH"] = os.pathsep.join(filter(None, [str(sim_python.parent), shared_environment.get("PATH", "")]))
     sim_environment["LD_LIBRARY_PATH"] = os.pathsep.join(filter(None, [str(conda_root / "envs" / args.sim_env / "lib"), shared_environment.get("LD_LIBRARY_PATH", "")]))
+    if args.sim_workers > 1:
+        sim_environment.update(OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", NUMEXPR_NUM_THREADS="1")
     server_entry = [str(ROOT / "scripts/serve_native.py" if args.backend == "native" else ROOT / "scripts/serve_streamed.py")]
     infer = [str(infer_python), *server_entry,
              "--model_path", str(checkpoint), "--use_length", str(args.use_length), "--use_bf16", str(args.precision == "bf16"),
              "--use_fp32", str(args.precision == "fp32"), "--use_compile", str(args.compile), "--port", str(args.port),
              "--num_steps", str(args.num_steps)]
+    if args.policy_rng == "scene":
+        infer.extend(["--policy-rng", "scene"])
     commands = []
     for setting in settings:
         for task in tasks:
@@ -184,9 +232,17 @@ def main():
                        "--port", str(args.port), "--robo_name", "robotwin", "--instruction_type", INSTRUCTIONS[setting],
                        "--eval_video_log", str(args.video), "--output_dir", str(run / setting / "eval_results")]
             commands.append({"setting": setting, "task": task, "command": command})
+    limits_file = robotwin / "task_config/_eval_step_limit.yml"
+    limits = yaml.safe_load(limits_file.read_text()) if limits_file.is_file() else {}
+    # Start expensive task/setting pairs together to reduce the final tail.
+    commands.sort(key=lambda item: (-limits.get(item["task"], 0), item["task"], item["setting"]))
     plan = {"checkpoint": str(checkpoint), "model_run": str(model_run), "precision": args.precision, "trials": args.trials,
             "inference_backend": backend, "use_length": args.use_length,
             "num_steps": args.num_steps, "compile": args.compile, "action_smoothing": args.action_smoothing,
+            "policy_rng": args.policy_rng, "sim_workers": args.sim_workers,
+            "policy_rng_protocol": POLICY_RNG if args.policy_rng == "scene" else "process_global_torch_legacy",
+            "expert_cache_mode": args.expert_cache_mode, "expert_cache_identity": cache_identity,
+            "expert_cache_replay_verified": False,
             "tasks": tasks, "settings": settings, "inference_command": infer, "evaluation_commands": commands,
             "instruction_types": INSTRUCTIONS, "expert_starts_per_scene": 5,
             "expert_seed_policy": EXPERT_SEED_POLICY, "fixed_checkpoint": True,
@@ -220,6 +276,9 @@ def main():
     # Isolate native Vulkan rendering before loading even a single model tensor.
     # WSL CUDA works independently from the renderer required by RoboTwin.
     from doctor import isolated_probe, RENDER_CODE
+    if sim_environment.get("LRVLA_RENDER_PCI"):
+        from lrvla.parallel_evaluation import inject_binding
+        RENDER_CODE = inject_binding(RENDER_CODE)
     preflight = isolated_probe(sim_python, RENDER_CODE, timeout=30, cwd=robotwin, env=sim_environment)
     (run / "render_preflight.json").write_text(json.dumps(preflight, indent=2) + "\n")
     if not preflight["ok"]:
@@ -233,7 +292,11 @@ def main():
     if prior_identity is not None and plan["checkpoint_identity"] != prior_identity:
         raise ValueError("Evaluation checkpoint bytes changed; use a new output directory.")
     (run / "evaluation_plan.json").write_text(json.dumps(plan, indent=2) + "\n")
-    server = worker = None
+    server = worker = sampler = None
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    def terminate(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, terminate)
     try:
         archive_previous_attempt(run, [run / "inference.log"])
         with (run / "inference.log").open("w") as log:
@@ -249,20 +312,22 @@ def main():
                     time.sleep(2)
             else:
                 raise TimeoutError(f"Inference server did not become ready; read {run / 'inference.log'}")
-            for item in commands:
-                logfile = run / item["setting"] / "eval_logs" / f"{item['task']}.log"
-                logfile.parent.mkdir(parents=True, exist_ok=True)
-                archive_previous_attempt(run, [logfile, logfile.with_suffix(".status.json")])
-                with logfile.open("w") as output:
-                    worker = subprocess.Popen(item["command"], cwd=robotwin, env=sim_environment, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
-                    code = worker.wait()
-                logfile.with_suffix(".status.json").write_text(json.dumps({"exit_code": code}) + "\n")
-                print(f"{item['setting']}/{item['task']}: exit={code}", flush=True)
+            if args.sim_workers > 1:
+                from lrvla.evaluation_resources import ResourceSampler
+                sampler = ResourceSampler(run / "resource_usage.jsonl", args.gpu)
+                sampler.start()
+            run_clients(commands, run=run, cwd=robotwin, environment=sim_environment,
+                        workers=args.sim_workers, server=server, archive=archive_previous_attempt, stop=stop)
     finally:
-        stop(worker)
-        stop(server)
-        report = aggregate_results(run, tasks, settings, args.precision, args.trials, backend, use_length=args.use_length)
-        export_official_results(report, run / "official_results.json", args.team_id, ROOT / "docs/official-templates/初赛评测结果模板_JSON版.json")
+        try:
+            stop(worker)
+            stop(server)
+            if sampler:
+                sampler.close()
+            report = aggregate_results(run, tasks, settings, args.precision, args.trials, backend, use_length=args.use_length)
+            export_official_results(report, run / "official_results.json", args.team_id, ROOT / "docs/official-templates/初赛评测结果模板_JSON版.json")
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
     report = json.loads((run / "results.json").read_text())
     print(f"Results: {run / 'results.json'} ({report['status']})")
     if not report["complete"]:
