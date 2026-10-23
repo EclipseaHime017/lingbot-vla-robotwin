@@ -24,8 +24,13 @@ def prepare_workflow(config, checkpoint, output, gpu_count, *, overrides=None, r
     cfg = yaml.safe_load(Path(config).read_text())
     required = {"tasks", "settings", "trials", "backend", "precision", "use_length", "num_steps", "compile",
                 "action_smoothing", "sim_workers", "policy_rng"}
-    if not isinstance(cfg, dict) or not required <= set(cfg) or set(cfg) - required - {"expert_cache", "expert_cache_mode"}:
+    if not isinstance(cfg, dict) or not required <= set(cfg) or set(cfg) - required - {"expert_cache", "expert_cache_mode", "sim_layout"}:
         raise ValueError("Unexpected parallel evaluation YAML fields.")
+    layout = cfg.get("sim_layout")
+    if layout is not None:
+        keys = {"server_gpus", "sims_on_server_gpu", "sims_per_sim_gpu"}
+        if not isinstance(layout, dict) or set(layout) != keys or any(type(layout[key]) is not int for key in keys):
+            raise ValueError("sim_layout needs integer server_gpus, sims_on_server_gpu and sims_per_sim_gpu.")
     cfg.update({k: v for k, v in (overrides or {}).items() if v is not None})
     tasks = parse_tasks(",".join(cfg["tasks"]) if isinstance(cfg["tasks"], list) else cfg["tasks"])
     if type(gpu_count) is not int or gpu_count < 1:
@@ -56,6 +61,7 @@ def prepare_workflow(config, checkpoint, output, gpu_count, *, overrides=None, r
             "policy_rng": cfg["policy_rng"], "expert_seed_policy": EXPERT_SEED_POLICY,
             "policy_rng_protocol": POLICY_RNG if cfg["policy_rng"] == "scene" else "process_global_torch_legacy",
             "expert_cache_mode": mode, "expert_cache": str(Path(cfg["expert_cache"]).resolve()) if cfg.get("expert_cache") else None,
+            **({"sim_layout": layout} if layout is not None else {}),
             "shards": [{"index": i, "tasks": members, "output": str(output / f"group-{i:03d}")}
                        for i, members in enumerate(balanced_groups(tasks, gpu_count, costs), 1)]}
     output.mkdir(parents=True, exist_ok=True)

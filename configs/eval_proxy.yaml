@@ -1,5 +1,6 @@
 # Diagnostic proxy: 12 tasks x 2 settings x 20 scenes = 480 scenes.
-# Four simulators per GPU are an opt-in target requiring a VRAM/throughput check.
+# Same layout as eval_parallel.yaml: never more than one simulator beside an
+# FP32 policy server. This layout still took a cluster node down on 2026-10-23.
 tasks:
   - adjust_bottle
   - click_bell
@@ -22,5 +23,9 @@ num_steps: 10
 compile: false
 action_smoothing: none
 sim_workers: 4
+sim_layout:
+  server_gpus: 2
+  sims_on_server_gpu: 1
+  sims_per_sim_gpu: 3
 policy_rng: scene
 expert_cache_mode: "off"

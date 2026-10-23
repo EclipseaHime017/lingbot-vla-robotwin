@@ -121,6 +121,7 @@ def parse_args(argv=None):
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--action-smoothing", choices=["none"], default="none")
     parser.add_argument("--sim-workers", type=int, default=1, help="Independent task/setting clients sharing this server")
+    parser.add_argument("--sim-gpus", help="Comma-separated simulator GPU for each worker slot; defaults to the policy GPU")
     parser.add_argument("--policy-rng", choices=["legacy", "scene"], default=None)
     parser.add_argument("--expert-cache", type=Path)
     parser.add_argument("--expert-cache-mode", choices=["off", "record", "replay"], default="off")
@@ -143,6 +144,8 @@ def parse_args(argv=None):
     args.policy_rng = args.policy_rng or ("scene" if args.sim_workers > 1 else "legacy")
     if args.policy_rng not in {"scene", "legacy"} or (args.sim_workers > 1 and args.policy_rng != "scene"):
         parser.error("Multiple simulators require policy_rng: scene")
+    if args.sim_gpus is not None and len(args.sim_gpus.split(",")) != args.sim_workers:
+        parser.error("--sim-gpus needs exactly one GPU per simulator worker")
     if args.expert_cache_mode not in {"off", "record", "replay"}:
         parser.error("Unknown expert_cache_mode")
     if args.expert_cache_mode != "off" and args.expert_cache is None:
@@ -216,6 +219,18 @@ def main():
     sim_environment["LD_LIBRARY_PATH"] = os.pathsep.join(filter(None, [str(conda_root / "envs" / args.sim_env / "lib"), shared_environment.get("LD_LIBRARY_PATH", "")]))
     if args.sim_workers > 1:
         sim_environment.update(OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", NUMEXPR_NUM_THREADS="1")
+    # Optional per-slot simulator GPUs: the policy server keeps args.gpu, while
+    # simulators may render and plan on other GPUs of the same node.
+    sim_environments = None
+    if args.sim_gpus and not args.dry_run:
+        from lrvla.parallel_evaluation import assigned_devices
+        slot_devices = {}
+        for value in dict.fromkeys(item.strip() for item in args.sim_gpus.split(",")):
+            device, = assigned_devices(value)
+            slot_devices[value] = device
+        sim_environments = [dict(sim_environment, CUDA_VISIBLE_DEVICES=slot_devices[item.strip()]["uuid"],
+                                 LRVLA_RENDER_PCI=slot_devices[item.strip()]["pci"])
+                            for item in args.sim_gpus.split(",")]
     server_entry = [str(ROOT / "scripts/serve_native.py" if args.backend == "native" else ROOT / "scripts/serve_streamed.py")]
     infer = [str(infer_python), *server_entry,
              "--model_path", str(checkpoint), "--use_length", str(args.use_length), "--use_bf16", str(args.precision == "bf16"),
@@ -240,6 +255,7 @@ def main():
             "inference_backend": backend, "use_length": args.use_length,
             "num_steps": args.num_steps, "compile": args.compile, "action_smoothing": args.action_smoothing,
             "policy_rng": args.policy_rng, "sim_workers": args.sim_workers,
+            "sim_gpu_slots": [env["CUDA_VISIBLE_DEVICES"] for env in sim_environments] if sim_environments else None,
             "policy_rng_protocol": POLICY_RNG if args.policy_rng == "scene" else "process_global_torch_legacy",
             "expert_cache_mode": args.expert_cache_mode, "expert_cache_identity": cache_identity,
             "expert_cache_replay_verified": False,
@@ -279,10 +295,18 @@ def main():
     if sim_environment.get("LRVLA_RENDER_PCI"):
         from lrvla.parallel_evaluation import inject_binding
         RENDER_CODE = inject_binding(RENDER_CODE)
-    preflight = isolated_probe(sim_python, RENDER_CODE, timeout=30, cwd=robotwin, env=sim_environment)
-    (run / "render_preflight.json").write_text(json.dumps(preflight, indent=2) + "\n")
-    if not preflight["ok"]:
-        raise RuntimeError(f"RoboTwin rendering preflight {preflight['status']}; read {run / 'render_preflight.json'}. Model loading was not started.")
+    # Probe every distinct simulator GPU before loading the policy.
+    probe_environments = list({env.get("LRVLA_RENDER_PCI"): env for env in (sim_environments or [sim_environment])}.values())
+    reports = []
+    for probe_environment in probe_environments:
+        preflight = isolated_probe(sim_python, RENDER_CODE, timeout=30, cwd=robotwin, env=probe_environment)
+        reports.append({"render_pci": probe_environment.get("LRVLA_RENDER_PCI"), **preflight})
+        if not preflight["ok"]:
+            break
+    (run / "render_preflight.json").write_text(json.dumps(reports[0] if len(reports) == 1 else reports, indent=2) + "\n")
+    failed = next((report for report in reports if not report["ok"]), None)
+    if failed:
+        raise RuntimeError(f"RoboTwin rendering preflight {failed['status']}; read {run / 'render_preflight.json'}. Model loading was not started.")
     with socket.socket() as port_check:
         try:
             port_check.bind(("127.0.0.1", args.port))
@@ -314,9 +338,10 @@ def main():
                 raise TimeoutError(f"Inference server did not become ready; read {run / 'inference.log'}")
             if args.sim_workers > 1:
                 from lrvla.evaluation_resources import ResourceSampler
-                sampler = ResourceSampler(run / "resource_usage.jsonl", args.gpu)
+                sampled = [args.gpu, *(env["CUDA_VISIBLE_DEVICES"] for env in sim_environments or [])]
+                sampler = ResourceSampler(run / "resource_usage.jsonl", ",".join(dict.fromkeys(sampled)))
                 sampler.start()
-            run_clients(commands, run=run, cwd=robotwin, environment=sim_environment,
+            run_clients(commands, run=run, cwd=robotwin, environment=sim_environment, environments=sim_environments,
                         workers=args.sim_workers, server=server, archive=archive_previous_attempt, stop=stop)
     finally:
         try:

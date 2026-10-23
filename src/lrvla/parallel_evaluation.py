@@ -73,7 +73,26 @@ def select_units(workflow, tasks):
     return units
 
 
-def evaluation_arguments(workflow, shard, device, port):
+def split_roles(devices, layout):
+    """Assign policy-server GPUs and the simulator GPU slots each server owns.
+
+    An FP32 policy needs about 25 GB, so a 40 GB GPU holds only one simulator
+    beside it. Simulator-only GPUs host several simulators without a policy.
+    """
+    servers = layout.get("server_gpus") if isinstance(layout, dict) else None
+    own, extra = (layout.get("sims_on_server_gpu"), layout.get("sims_per_sim_gpu")) if isinstance(layout, dict) else (None, None)
+    if (type(servers) is not int or type(own) is not int or type(extra) is not int
+            or not 1 <= servers <= len(devices) or own < 0 or extra < 1):
+        raise ValueError("sim_layout needs integer server_gpus >= 1, sims_on_server_gpu >= 0 and sims_per_sim_gpu >= 1.")
+    policy_devices, simulator_devices = devices[:servers], devices[servers:]
+    if not simulator_devices or len(simulator_devices) % servers:
+        raise ValueError("Simulator-only GPUs must divide evenly among policy-server GPUs.")
+    slots = {device["uuid"]: [device] * own + [gpu for gpu in simulator_devices[index::servers] for _ in range(extra)]
+             for index, device in enumerate(policy_devices)}
+    return policy_devices, slots
+
+
+def evaluation_arguments(workflow, shard, device, port, sim_slots=None):
     if workflow["inference_backend"] not in {"native", "streamed", "streamed_sdpa_reference_moe"}:
         raise ValueError("Unknown inference backend.")
     settings = workflow["settings"]
@@ -97,7 +116,10 @@ def evaluation_arguments(workflow, shard, device, port):
         if workflow.get("action_smoothing") != "none":
             raise ValueError("Unsupported action smoothing profile.")
     if "sim_workers" in workflow:
-        arguments.extend(["--sim-workers", str(workflow["sim_workers"]), "--policy-rng", workflow["policy_rng"]])
+        workers = len(sim_slots) if sim_slots else workflow["sim_workers"]
+        arguments.extend(["--sim-workers", str(workers), "--policy-rng", workflow["policy_rng"]])
+    if sim_slots:
+        arguments.extend(["--sim-gpus", ",".join(gpu["uuid"] for gpu in sim_slots)])
     if workflow.get("expert_cache_mode", "off") != "off":
         arguments.extend(["--expert-cache-mode", workflow["expert_cache_mode"], "--expert-cache", workflow["expert_cache"]])
     # Legacy v1 evaluate.py has fixed 10 denoising steps and compile=False.
@@ -172,7 +194,7 @@ def available_port():
         return connection.getsockname()[1]
 
 
-def run_parallel(workflow, units, devices, *, evaluate_script, log_dir, python=sys.executable):
+def run_parallel(workflow, units, devices, *, evaluate_script, log_dir, python=sys.executable, sim_slots=None):
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     pending = queue.Queue()
@@ -201,12 +223,18 @@ def run_parallel(workflow, units, devices, *, evaluate_script, log_dir, python=s
                                 break
                         else:
                             raise RuntimeError("Could not allocate a distinct inference port.")
+                    slots = (sim_slots or {}).get(device["uuid"])
                     command = [str(python), str(ROOT / "scripts/evaluate_parallel.py"), "--worker-entry",
-                               str(evaluate_script), *evaluation_arguments(workflow, unit, device, port)]
-                    env = dict(os.environ, CUDA_VISIBLE_DEVICES=device["uuid"], LRVLA_RENDER_PCI=device["pci"],
+                               str(evaluate_script), *evaluation_arguments(workflow, unit, device, port, slots)]
+                    # The evaluator must see its simulator GPUs; it narrows the
+                    # policy server to device["uuid"] and each simulator to its slot.
+                    visible = ",".join(dict.fromkeys([device["uuid"], *(gpu["uuid"] for gpu in slots or [])]))
+                    env = dict(os.environ, CUDA_VISIBLE_DEVICES=visible, LRVLA_RENDER_PCI=device["pci"],
                                LRVLA_EXPECT_EXPERT_SEED_POLICY=workflow["expert_seed_policy"],
                                PYTHONUNBUFFERED="1", PYTHONNOUSERSITE="1")
-                    logfile = log_dir / ("-".join(unit["tasks"]) + ".log")
+                    # Shard output names are unique and short; joined task names can
+                    # exceed the 255-byte file-name limit for large shards.
+                    logfile = log_dir / f"{output.name}.log"
                     with logfile.open("a") as output_log:
                         with lock:
                             if stopped.is_set():
@@ -285,9 +313,16 @@ def main(argv=None):
     workflow = json.loads(args.workflow.read_text())
     args.log_dir = args.log_dir or args.workflow.parent / "workers"
     units, devices = select_units(workflow, args.tasks), assigned_devices(args.gpus)
+    sim_slots = None
+    if workflow.get("sim_layout"):
+        devices, sim_slots = split_roles(devices, workflow["sim_layout"])
+        if any(len(slots) != workflow["sim_workers"] for slots in sim_slots.values()):
+            raise ValueError("sim_layout slots per policy server differ from the workflow's sim_workers.")
     print(json.dumps({"devices": devices, "tasks": [unit["tasks"] for unit in units],
+                      "sim_slots": {uuid: [gpu["uuid"] for gpu in slots] for uuid, slots in (sim_slots or {}).items()},
                       "evaluator": str(args.evaluate_script.resolve())}), flush=True)
-    code = run_parallel(workflow, units, devices, evaluate_script=args.evaluate_script.resolve(), log_dir=args.log_dir)
+    code = run_parallel(workflow, units, devices, evaluate_script=args.evaluate_script.resolve(), log_dir=args.log_dir,
+                        sim_slots=sim_slots)
     if workflow.get("schema") == "lrvla-parallel-evaluation-v1" and args.tasks == "all":
         from .evaluation_workflow import aggregate_workflow
         report = aggregate_workflow(workflow)

@@ -337,14 +337,14 @@ bash eval.sh --checkpoint runs/expert_full_clean/checkpoints/global_step_10000/h
 
 这会运行 50 × 2 × 100 个场景，使用原生 FP32 推理，需要相应显存和仿真环境。结果写入输出目录的 `results.json`；添加 `--skip-completed` 可保留已完成任务，重新运行失败任务，并校验模型权重与评测协议一致。
 
-多 GPU 入口按任务长度分组，每张卡加载一份模型服务，用多个独立仿真进程并行运行不同的“任务 × 环境设定”。[configs/eval_parallel.yaml](configs/eval_parallel.yaml) 覆盖全部 10,000 场景，默认每卡两路仿真；[configs/eval_proxy.yaml](configs/eval_proxy.yaml) 覆盖 12 个任务、两种设定、各 20 场景，共 480 场景，配置为每卡四路。代理结果用于模型筛选，完整结果仍需运行全部任务。
+多 GPU 入口按任务长度分组，用多个独立仿真进程并行运行不同的“任务 × 环境设定”。FP32 模型服务约占 25 GB 显存，单个仿真进程约 9 GB，因此 40 GB 的 A100 上，模型服务旁边只能再放一路仿真，两路会超出显存。2026-10-22 至 10-23，集群四卡节点上的并行评测共 4 次使计算节点宕机；最后一次使用下述分卡方式，每卡显存仅 24.9 GB，说明宕机并非显存超限，原因尚未查明。查明之前不要在集群上运行多卡并行评测。两份并行配置都使用 `sim_layout` 按角色分卡：每个四卡节点用 2 张卡各运行一份模型服务和一路仿真，另 2 张卡只运行仿真（每卡 3 路），每份服务对应 4 路仿真，单节点共 8 路并发。仿真进程通过本机 WebSocket 访问模型服务，渲染与运动规划绑定在各自的卡上。[configs/eval_parallel.yaml](configs/eval_parallel.yaml) 覆盖全部 10,000 场景；[configs/eval_proxy.yaml](configs/eval_proxy.yaml) 覆盖 12 个任务、两种设定、各 20 场景，共 480 场景。代理结果用于模型筛选，完整结果仍需运行全部任务。
 
 ```bash
 # 仅生成分组与参数清单，不加载模型或启动仿真
 python scripts/evaluate_parallel.py --config configs/eval_proxy.yaml \
   --checkpoint runs/expert_full_clean/checkpoints/global_step_10000/hf_ckpt \
-  --gpus 0,1,2,3 --sim-workers 2 \
-  --output runs/evaluation/proxy-two-sims --prepare-only
+  --gpus 0,1,2,3 \
+  --output runs/evaluation/proxy-layout --prepare-only
 
 # 在已分配 GPU 的计算环境中运行，并复用完成的任务及环境组合
 python scripts/evaluate_parallel.py \
