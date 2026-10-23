@@ -12,6 +12,7 @@ data/
 models/
 runs/
 artifacts/
+tmp/
 __pycache__/
 *.pyc
 *.egg-info/
@@ -23,3 +24,4 @@ __pycache__/
 /tests/test_hpc_*.py
 *[Nn][Ss][Cc][Cc]*
 sshkey.txt
+huggingface.txt
