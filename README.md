@@ -335,7 +335,7 @@ bash eval.sh --checkpoint runs/expert_full_clean/checkpoints/global_step_10000/h
   --output runs/evaluation/expert-full
 ```
 
-这会运行 50 × 2 × 100 个场景，使用原生 FP32 推理，需要相应显存和仿真环境。结果写入输出目录的 `results.json`；添加 `--skip-completed` 可保留已完成任务，重新运行失败任务，并校验模型权重与评测协议一致。
+这会运行 50 × 2 × 100 个场景，使用原生 FP32 推理，需要相应显存和仿真环境。结果写入输出目录的 `results.json`；添加 `--skip-completed` 可保留已完成任务，重新运行失败任务，并校验模型权重与评测协议一致。模型筛选可用 3.8 的本地快速评测（50 × 2 × 10）。
 
 多 GPU 入口按任务长度分组，用多个独立仿真进程并行运行不同的“任务 × 环境设定”。FP32 模型服务约占 25 GB 显存，单个仿真进程约 9 GB，因此 40 GB 的 A100 上，模型服务旁边只能再放一路仿真，两路会超出显存。2026-10-22 至 10-23，集群四卡节点上的并行评测共 4 次使计算节点宕机；最后一次使用下述分卡方式，每卡显存仅 24.9 GB，说明宕机并非显存超限，原因尚未查明。查明之前不要在集群上运行多卡并行评测。两份并行配置都使用 `sim_layout` 按角色分卡：每个四卡节点用 2 张卡各运行一份模型服务和一路仿真，另 2 张卡只运行仿真（每卡 3 路），每份服务对应 4 路仿真，单节点共 8 路并发。仿真进程通过本机 WebSocket 访问模型服务，渲染与运动规划绑定在各自的卡上。[configs/eval_parallel.yaml](configs/eval_parallel.yaml) 覆盖全部 10,000 场景；[configs/eval_proxy.yaml](configs/eval_proxy.yaml) 覆盖 12 个任务、两种设定、各 20 场景，共 480 场景。代理结果用于模型筛选，完整结果仍需运行全部任务。
 
@@ -450,3 +450,38 @@ python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=4 \
 预设从 5 个 epoch 的运行（38,620 步）热启动，再训练 12,000 步：全局 batch 64，学习率峰值 `3e-5`，预热 300 步后余弦衰减，每卡 4 个数据加载进程。复现时，先按 3.6 训练原版模型，再以其导出作为 `init_from`。
 
 每项增强默认关闭，并使用独立的随机数流：开启新增项不会改变已有增强的取值，旧配置在新代码下逐元素复现。[configs/train_expert_full_warm2.yaml](configs/train_expert_full_warm2.yaml) 为第二轮：以第一轮导出为 `init_from`，在第一轮的处理之上加入随机遮挡、色温、模糊和像素噪声（裁剪保留面积下限 0.85），学习率峰值 `2e-5`，训练 8,000 步。完整复现顺序为：3.6 原版训练 → `train_expert_full_warm.yaml` → `train_expert_full_warm2.yaml`，后一步的 `init_from` 指向前一步的导出。
+
+### 3.8 本地快速评测（50 × 2 × 10）
+
+[scripts/evaluate_quick.py](scripts/evaluate_quick.py) 用固定协议筛选模型：50 个任务 × clean／randomized 两种设定 × 每组前 10 个场景种子，共 1,000 个场景。任务、设定和场景数不可修改，任意两次快速评测使用相同场景，结果可以直接比较。脚本不改动 `evaluate.py` 和官方客户端：每张 GPU 运行一份 `evaluate.py`（一个模型服务加若干路仿真），按 RoboTwin 步数上限把任务均衡分到各卡，结束后合并成 `results.json`、`official_results.json` 和摘要 `summary.md`。快速评测只用于内部筛选；正式成绩由官方按提交的 `eval.sh` 推理参数复测，每个任务每种设定 100 个场景，完整评测仍用 `eval.sh`。
+
+先按 2.1–2.3 安装 `lingbot-vla`、`robotwin-sim` 环境、Qwen3-VL-4B 和仿真资产，并通过环境诊断。然后下载整个模型目录，其中的 `assets/`、`configs/` 和 `lingbotvla_cli.yaml` 都需要：
+
+```bash
+source scripts/activate.sh
+hf download EclipseaHime017/Expert --include "expert-warm-aug-12k/*" --local-dir models/hf/Expert
+
+# 单卡；中断后重跑同一命令即可续跑，已完成的任务保留
+python scripts/evaluate_quick.py --checkpoint models/hf/Expert/expert-warm-aug-12k --gpus 0
+
+# 四卡，每卡两路仿真，并与已有结果对照
+python scripts/evaluate_quick.py --checkpoint models/hf/Expert/expert-warm-aug-12k \
+  --gpus 0,1,2,3 --sims-per-gpu 2 --baseline runs/evaluation/quick-expert5epochs-step38620
+```
+
+`--checkpoint` 可以是 `.../checkpoints/global_step_N/hf_ckpt`，也可以是只含一个导出的模型目录。默认输出到 `runs/evaluation/quick-<模型名>-step<N>`。运行时每 5 分钟打印进度和预计剩余时间；某张卡的分片失败会自动重试一次，仍未完成时重跑同一命令，只补跑未完成的任务。`--baseline` 接受 `results.json`、`official_results.json` 或另一个快速评测目录。`--dry-run` 只生成各卡的评测计划，不加载模型。
+
+加速方式：
+
+- `--sims-per-gpu N`：同卡 N 路仿真共享一个模型服务。每个动作要做两臂 TOPP 和数十个物理子步，这些都在 CPU 上单线程完成，单路仿真时 GPU 大部分时间空闲，增加路数预计可接近线性提速（尚未在本地实测），直到 CPU 核数或显存用尽。FP32 每卡约需 25 + 9 × N GiB（N = 1 时实测峰值 34.0 GiB，更多路为估算），脚本启动前检查空闲显存：40 GB 卡只能 N = 1，48 GB 卡 N = 2，80 GB 卡 N = 4～5。多路时模型噪声按场景生成（`policy_rng: scene`），结果不随调度变化；单路沿用评测器默认的进程全局随机流，任务顺序或卡数不同时结果有正常波动。
+- 多台机器：`--part 1/2` 与 `--part 2/2` 各运行一半任务，完成后合并；合并时检查权重 sha256 和推理配置一致。单张 80 GB 卡也可以同时运行这两个进程。
+
+```bash
+python scripts/evaluate_quick.py --collect runs/evaluation/quick-expert-warm-aug-12k-step12000-part1of2 \
+  runs/evaluation/quick-expert-warm-aug-12k-step12000-part2of2 \
+  --output runs/evaluation/quick-expert-warm-aug-12k-step12000
+```
+
+- `--precision bf16`：空闲显存不足 34 GiB 的卡（如 24 GB 卡）只能用 BF16，结果为近似值，不能与 FP32 结果合并。
+
+`summary.md` 给出 clean、randomized 和两设定平均的成功率及 95% 区间，有对照时给出差值和区间。每个任务只有 10 个场景，单任务成功率的区间约 ±30 个百分点；成功率在 40% 左右时，两设定平均的区间约 ±3 个百分点，两个模型的平均值相差不到约 4 个百分点时无法区分。摘要末尾列出每场景各阶段的平均耗时（专家预检、场景初始化、取观测、模型推理、通信与排队、仿真执行动作），用于判断瓶颈。PBS 作业内只允许单卡单路仿真，因为多卡并行评测曾使集群节点宕机。
