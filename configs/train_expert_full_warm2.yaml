@@ -1,0 +1,51 @@
+# Second warm-start round; run only through scripts/train_warm.py.
+# Starts from the first warm-start export (configs/train_expert_full_warm.yaml) and
+# adds rule 2.1.1 pixel degradations aimed at randomized scenes: random erasing
+# (occlusion), colour-temperature jitter, Gaussian blur and Gaussian pixel noise,
+# on top of the round-1 data handling. The VLM stays frozen. If round 1 does not
+# beat the 5-epoch model, point init_from at the 5-epoch export instead.
+mode: expert
+expert_last_n_layers: -1
+init_from: runs/expert-warm-aug/checkpoints/global_step_12000/hf_ckpt
+base_checkpoint: models/lingbot-vla-v2-6b
+qwen_path: models/Qwen3-VL-4B-Instruct
+architecture_yaml: vendor/lingbot-vla-v2/configs/vla/robotwin/robotwin.yaml
+manifest: data/clean_manifest_all50.json
+norm_stats: data/clean_norm_stats_all50.json
+output_dir: runs/expert-warm-aug2
+device: cuda
+train_projections: true
+batch_size: 16
+global_batch_size: 64
+gradient_accumulation: 1
+require_no_gradient_accumulation: true
+fsdp_wrap: decoder_layer
+gradient_checkpointing: true
+chunk_size: 50
+action_chunk_tail: mask
+img_size: 256
+image_augment: true
+image_crop_scale: 0.85
+state_noise_std: 0.01
+color_temperature: 0.1
+image_blur_prob: 0.2
+image_noise_std: 0.02
+image_erase_prob: 0.5
+image_erase_max_area: 0.12
+resample_seen_instructions: true
+seen_instructions: data/clean_seen_instructions.json
+sequence_wise_loss_coeff: 0.001
+router_z_loss_coeff: 0.0001
+num_workers: 4
+val_episodes: 0
+seed: 44
+lr: 0.00002
+weight_decay: 0.01
+max_grad_norm: 1.0
+warmup_steps: 200
+max_steps: 8000
+eval_every: 1000
+validation_frames_per_episode: 1
+save_every: 1000
+export: true
+export_dtype: float32

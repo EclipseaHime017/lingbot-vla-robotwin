@@ -417,3 +417,36 @@ python scripts/run_with_batch_fallback.py \
 采样器在每个 epoch 中先全局随机排列所有训练帧，再分配给各 GPU，消费完当前排列后才进入下一轮。以 494328 个训练帧、全局 batch 64 为例，一轮需要 7724 次更新，末尾仅补齐 8 个重复帧；从基模训练 10000 次更新会完成全部训练样本的首轮遍历。日志的 `epoch` 和 `batch_offset` 可用于核对遍历进度。训练规模直接修改现有 `configs/train_expert_full.yaml` 的 `max_steps`，或用 `--max-steps` 覆盖。
 
 10000 × 64 约等于 1.29 遍该训练集。覆盖全部样本不代表收敛；总步数应结合覆盖全任务的验证曲线和独立评估决定，仓库不自动延长训练或解冻 VLM。
+
+### 3.7 热启动与规则内数据增强（独立入口）
+
+原版训练入口 `scripts/train.py` 与 `configs/train_expert_full.yaml` 保持不变，可按 3.6 原样复现此前的运行。热启动训练使用独立入口 [scripts/train_warm.py](scripts/train_warm.py) 和配置 [configs/train_expert_full_warm.yaml](configs/train_expert_full_warm.yaml)。实现位于 [src/lrvla/warm_start.py](src/lrvla/warm_start.py)：仅在该入口进程内替换训练模块中的数据集类与若干函数，进程结束即还原，不修改任何原有源文件。
+
+该入口在原训练流程上增加以下内容，均属规则允许的处理方式：
+
+| 配置项 | 作用 | 规则依据 |
+|---|---|---|
+| `init_from` | 从本仓库此前一次运行的 FP32 导出（`hf_ckpt`，`export.json` 标明 FP32 主权重）初始化可训练参数；冻结参数仍取自原始基模 | 训练起点链路仍为 `lingbot-vla-v2-6b` |
+| `image_crop_scale` | 每个视角随机保留 `[image_crop_scale, 1]` 面积并缩放回原尺寸，即小范围裁剪、平移、缩放 | 2.1.1 白名单 |
+| `state_noise_std` | 对归一化后的本体状态的真实关节维度施加加性高斯噪声，填充维度保持为 0 | 2.1 机器人状态扰动 |
+| `image_augment` | 上游实现的亮度、对比度、饱和度抖动，三路视角共用同一组参数 | 2.1.1 白名单 |
+| `resample_seen_instructions` | 每次取样时从同一条轨迹的 seen 指令中重新抽取，不读取 unseen 指令 | 2.1 seen 池内指令替换 |
+| `image_erase_prob`、`image_erase_max_area` | 随机遮挡：每个视角按概率用均匀噪声覆盖一个占画面 2% 至 `image_erase_max_area` 的矩形 | 2.1.1 随机遮挡 |
+| `color_temperature` | 色温抖动：红、蓝通道反向增益，三路视角共用同一组参数 | 2.1.1 色温 |
+| `image_blur_prob` | 按概率施加 5×5 高斯模糊，sigma 取 0.1–1.0 | 2.1.1 高斯模糊 |
+| `image_noise_std` | 像素高斯噪声，标准差在 0 至该值之间随机取 | 2.1.1 高斯噪声 |
+
+增强只作用于训练集，验证与推理不受影响。增强参数写入 `run_metadata.json` 的 `data_sampling`，并参与续训一致性校验；热启动来源写入运行目录的 `warm_start.json`。预设使用全部 50 条示范（`val_episodes: 0`），因此先生成同轨迹 seen 指令文件，以及覆盖 0–49 号示范的 manifest 与归一化统计（均为新文件，不覆盖原文件）：
+
+```bash
+source scripts/activate.sh
+python scripts/prepare_seen_instructions.py
+python scripts/prepare_data.py --tasks all --audit-only --val-episodes 0 \
+  --manifest data/clean_manifest_all50.json --norm-output data/clean_norm_stats_all50.json
+python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=4 \
+  scripts/train_warm.py --config configs/train_expert_full_warm.yaml
+```
+
+预设从 5 个 epoch 的运行（38,620 步）热启动，再训练 12,000 步：全局 batch 64，学习率峰值 `3e-5`，预热 300 步后余弦衰减，每卡 4 个数据加载进程。复现时，先按 3.6 训练原版模型，再以其导出作为 `init_from`。
+
+每项增强默认关闭，并使用独立的随机数流：开启新增项不会改变已有增强的取值，旧配置在新代码下逐元素复现。[configs/train_expert_full_warm2.yaml](configs/train_expert_full_warm2.yaml) 为第二轮：以第一轮导出为 `init_from`，在第一轮的处理之上加入随机遮挡、色温、模糊和像素噪声（裁剪保留面积下限 0.85），学习率峰值 `2e-5`，训练 8,000 步。完整复现顺序为：3.6 原版训练 → `train_expert_full_warm.yaml` → `train_expert_full_warm2.yaml`，后一步的 `init_from` 指向前一步的导出。
