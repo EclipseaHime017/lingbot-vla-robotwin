@@ -103,6 +103,9 @@ def add_runtime_features(source, *, scene_rng=False, expert_cache=False, timing=
                               '            # A scene that cannot initialize still consumes its policy trial.\n')
         source = replace_once(source, '\n        TASK_ENV.test_num += 1\n',
                               '\n        TASK_ENV.test_num += 1\n        metrics.finish(seed=now_seed, success=succ)\n')
+    # A bind-all address is not a client destination; both processes run on this node.
+    source = replace_once(source, "    model = WebsocketClientPolicy(port=usr_args['port'])\n",
+                          "    model = WebsocketClientPolicy(host='127.0.0.1', port=usr_args['port'])\n")
     tree = ast.parse(source)
     if expert_cache:
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "eval_policy")

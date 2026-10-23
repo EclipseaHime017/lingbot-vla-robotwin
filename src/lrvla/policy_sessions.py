@@ -58,6 +58,10 @@ def policy_server(policy, port, *, scene_rng=False):
     if not scene_rng:
         return WebsocketPolicyServer(policy, port=port)
 
+    # Import Torch and initialize its device before accepting concurrent handshakes.
+    # Doing this inside the first handler can block the event loop past open_timeout.
+    PolicySession(policy)
+
     class SharedServer(WebsocketPolicyServer):
         async def _handler(self, websocket):
             # A lightweight delegate owns connection state, never model weights.

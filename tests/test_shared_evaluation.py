@@ -15,11 +15,52 @@ import torch
 from lrvla.evaluation import adapt_eval_client
 from lrvla.evaluation_runtime import add_runtime_features
 from lrvla.evaluation_workflow import aggregate_workflow, prepare_workflow
-from lrvla.policy_sessions import PolicySession
+from lrvla.policy_sessions import PolicySession, policy_server
 from lrvla.scene_bank import SceneBank, source_identity
 from lrvla.simulation_workers import run_clients
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_generated_clients_use_loopback_for_local_inference():
+    source = adapt_eval_client((ROOT / "vendor/lingbot-vla-v2/experiment/robotwin/eval_policy_client_lingbotvla.py").read_text(), 100)
+    for scene_rng in (False, True):
+        generated = add_runtime_features(source, scene_rng=scene_rng)
+        calls = [node for node in ast.walk(ast.parse(generated)) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == "WebsocketClientPolicy"]
+        assert len(calls) == 1
+        assert next(item.value.value for item in calls[0].keywords if item.arg == "host") == "127.0.0.1"
+
+
+def test_concurrent_websocket_handshakes_survive_cold_runtime(monkeypatch):
+    import asyncio
+    import time
+    from websockets.asyncio.server import serve
+    from websockets.sync.client import connect
+    import lrvla.policy_sessions as sessions
+    monkeypatch.syspath_prepend(str(ROOT / "vendor/lingbot-vla-v2"))
+    from deploy.msgpack_numpy import Packer, unpackb
+    class ColdSession:
+        ready = False
+        def __init__(self, policy):
+            if not self.ready:
+                time.sleep(1)
+                type(self).ready = True
+        def infer(self, observation):
+            return {"action": [1, 2]}
+    monkeypatch.setattr(sessions, "PolicySession", ColdSession)
+    server = policy_server(SimpleNamespace(chunk_ret=True), 0, scene_rng=True)
+    def client(port):
+        with connect(f"ws://127.0.0.1:{port}", open_timeout=.4, proxy=None) as connection:
+            metadata = unpackb(connection.recv(timeout=3))
+            connection.send(Packer().pack({"reset": True}))
+            response = unpackb(connection.recv(timeout=3))
+            return metadata["policy_rng"], response["action"]
+    async def run():
+        async with serve(server._handler, "127.0.0.1", 0) as running:
+            port = running.sockets[0].getsockname()[1]
+            return await asyncio.gather(*(asyncio.to_thread(client, port) for _ in range(2)))
+    assert asyncio.run(run()) == [(sessions.POLICY_RNG, [1, 2])] * 2
 
 
 def test_shared_policy_interleaving_preserves_each_scene_noise_and_global_rng(monkeypatch):
