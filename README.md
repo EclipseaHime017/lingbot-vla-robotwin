@@ -485,3 +485,31 @@ python scripts/evaluate_quick.py --collect runs/evaluation/quick-expert-warm-aug
 - `--precision bf16`：空闲显存不足 34 GiB 的卡（如 24 GB 卡）只能用 BF16，结果为近似值，不能与 FP32 结果合并。
 
 `summary.md` 给出 clean、randomized 和两设定平均的成功率及 95% 区间，有对照时给出差值和区间。每个任务只有 10 个场景，单任务成功率的区间约 ±30 个百分点；成功率在 40% 左右时，两设定平均的区间约 ±3 个百分点，两个模型的平均值相差不到约 4 个百分点时无法区分。摘要末尾列出每场景各阶段的平均耗时（专家预检、场景初始化、取观测、模型推理、通信与排队、仿真执行动作），用于判断瓶颈。PBS 作业内只允许单卡单路仿真，因为多卡并行评测曾使集群节点宕机。
+
+### 3.9 示范筛选（独立入口）
+
+少数官方 clean 示范来自不合理的逆运动学解：手臂翻转后绕行、轨迹明显过长，或单帧关节大幅跳变（参见 Hy-Embodied-0.5-VLA 附录 A 的数据清洗）。[scripts/filter_demos.py](scripts/filter_demos.py) 只依据示范自身的统计量筛选，属于规则允许的示范统计筛选，不读取任何评测结果；所有任务使用同一套规则和阈值，并且只在同一任务、同一手臂组合的示范之间比较，避免把左右臂分工的正常差异当成异常：
+
+| 规则 | 判定 |
+|---|---|
+| `long` | 轨迹长度的稳健 z 分数大于 4 |
+| `ik_ratio` | 关节总行程与末端行程之比的稳健 z 分数大于 5（关节大幅转动而夹爪几乎不动） |
+| `excursion` | 任一臂关节超出组内 10%–90% 分位范围的距离大于该范围宽度 |
+| `jump` | 单帧任一臂关节变化大于 0.3 rad |
+
+组内少于 8 条示范时只检查 `jump`。2,500 条示范中剔除 74 条，涉及 27 个任务，单任务最多 8 条；清单与每条的原因保存在 [configs/demo_filter.json](configs/demo_filter.json)。
+
+```bash
+source scripts/activate.sh
+# 由官方压缩包重新生成剔除清单，先校验压缩包 sha256
+python scripts/filter_demos.py scan
+# 由完整 50 条示范的 manifest 生成过滤后的 manifest，只在保留的示范上计算归一化统计
+python scripts/filter_demos.py manifest --manifest data/clean_manifest_all50.json \
+  --output data/clean_manifest_filtered.json --norm-output data/clean_norm_stats_filtered.json
+python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=4 \
+  scripts/train_warm.py --config configs/train_expert_full_filter.yaml
+```
+
+[configs/train_expert_full_filter.yaml](configs/train_expert_full_filter.yaml) 从 5 个 epoch 的导出热启动，尽量少改动：去掉上述示范并使用其余全部示范，seen 指令在同一轨迹内重抽，学习率峰值 `1e-5`、预热 100 步，训练 6,000 步；与 5 个 epoch 的运行一样不使用图像或状态增强。原有入口、配置和数据文件不变。
+
+[configs/train_expert_full_filter_lr3e5.yaml](configs/train_expert_full_filter_lr3e5.yaml) 是更强的变体：起点、数据和指令处理相同，更新量与第一轮相同（学习率峰值 `3e-5`、预热 300 步、12,000 步）。它与第一轮的差别只在去掉了图像和状态增强（以及剔除的示范），两者对比可以区分增强与更新量各自的影响。

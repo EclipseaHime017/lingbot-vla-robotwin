@@ -1,0 +1,1103 @@
+{
+  "filter_version": "same_arm_robust_v1",
+  "thresholds": {
+    "length_z": 4.0,
+    "ik_ratio_z": 5.0,
+    "excursion": 1.0,
+    "jump_rad": 0.3
+  },
+  "episodes_scanned": 2500,
+  "episodes_excluded": 74,
+  "archives": {
+    "adjust_bottle": "5554b6b30e37c6ed2f0bbc48079e8ad79d9512e9d4f910a5e71b0d5ad8fbe50e",
+    "beat_block_hammer": "a135ad233bdcffff65fb636780f95ec34abc36ccf2bd0ff26ab07c9c464cc6af",
+    "blocks_ranking_rgb": "3752a61e42081ce64e3d3d76b5634836904bced29007b6cec8f3bfa12b4d6387",
+    "blocks_ranking_size": "da55764f0b61a0a4ba2ddb6b6cf8577b96246937bb3621d6d3eace8842ac51e8",
+    "click_alarmclock": "65f6ca24635e9937f84b441ad66cf585a330e5664035a14dc98b58348a85dca1",
+    "click_bell": "4b959d712791792a6dba9a97fa31d81cb4393acd39874470ee19070f8dbeb212",
+    "dump_bin_bigbin": "0b6725f856465167ad33efe94612294f2645bce86e8ad5734ab0e72f5b4824ab",
+    "grab_roller": "e35c8c68022ef07517d50418e7281ec054581aaf01fce65b2a64dc7642c78f9b",
+    "handover_block": "7e9e7145c3f1a4093d7a24a44dc5c0b1af2ccc551c3bc8e50d7bdde824da4947",
+    "handover_mic": "7573da11ab08822daa3e94559081f327a887e8eb293e13cabd639a6064df70dc",
+    "hanging_mug": "d854cbe1e70563417a05bffc9295e3b46e993287e43294f9575a5d4cbf8d2b09",
+    "lift_pot": "17df35b8616e718bab334b0e518ab0bca68d8a1101554250f497262da2ec820f",
+    "move_can_pot": "fbf5231c5be71405364b09ed718cfca1e07a6509f6d1a801f5922516da0ade09",
+    "move_pillbottle_pad": "1fe168f8d156ab1ece9cb3bdf71542a24821bcd620408a04fd822e87c24bfaf0",
+    "move_playingcard_away": "911a26e767ed4fe2d5d5ff3a729d16a07ffd32ed0bb2fae23873fd8bb977600b",
+    "move_stapler_pad": "775a4932559327339b0bb7fa8ff6fd136dbcf5c9e1d495a6e9f0334fbe494527",
+    "open_laptop": "89407cff2389d80d8b2df9a9228775ccbebb7cf470e22704b9655d887d0ec4a3",
+    "open_microwave": "8cf14879560849a76738fb05a1842608fe79831efac625b81aa4c886edeff132",
+    "pick_diverse_bottles": "95e6527af4857cd6141047cadf39105ca6f917601ac26e08ff54d8d6589147a4",
+    "pick_dual_bottles": "39de6dfd41d020933bc209c5b60479eaf3e45a1c6a5ed7debf7be41af6c52a42",
+    "place_a2b_left": "e7aad39683853ac31c605c7b8317576eaae8927c183e84d62428c29c9f44a465",
+    "place_a2b_right": "ecf2f3ee62973220b23c8cd8bf2c3301f1c116f745b3df615760fa378767eac2",
+    "place_bread_basket": "f5730c4cc254601dbfdbbc55fe91c8f62bcf3c52011939fe60b4f5bf9a4b156a",
+    "place_bread_skillet": "f0570822c1286b7610a3bec1018f421548df0002c98b9392a0f809cf5245cfb3",
+    "place_burger_fries": "23ebeffcb668e55ef6d560a169c3a68032017a080a8228d97da57538844de0b1",
+    "place_can_basket": "5972dcde682e9395f16c8fd407b8ab38627d5378ea2a01c4944b4b16436e1a4d",
+    "place_cans_plasticbox": "e09f4b7278872e8785d55efc0613d4d2bc1e5655731dcc9e0a7d084288785f8f",
+    "place_container_plate": "bb6a7191530f69f1bdc5d4b7d0643b89a4fbb769f0fbdc256ae1e0bc590f66f2",
+    "place_dual_shoes": "0cdb0e5c03a30332c928cce1c430a21da8248adc01608706487709283168f703",
+    "place_empty_cup": "e397359cdc7b19cace5efd766fabe15e549c6722c9b90f854915198258c24fac",
+    "place_fan": "4b458e951402b50e8006ac10b63a8e3e5eec002e7b67e40b12ee30736b9694ff",
+    "place_mouse_pad": "2e20e01f599e547579e82b5667a289111e523bb526951b60d06678f6a015696f",
+    "place_object_basket": "76518a717756589fc6787741e83dff24c6467e4506de8f7c5994008765f094d2",
+    "place_object_scale": "a4a1bcf424a36026a27a67dee7c544f1e4245bee4f4cfab939b730c94812da8a",
+    "place_object_stand": "4fd24a6e29b63149b4c5c1598cb16dccb25514acb60666ec457bcd174ab60c3d",
+    "place_phone_stand": "745a98306a28fd5e112388489b1973c43b9bb9946233c7ab4f1e40c6d1b5d065",
+    "place_shoe": "56389d47bc4df90a40a3f0648ef4f1e48beda1d15386ee03c8586227809e29db",
+    "press_stapler": "233188b276f97b7c40cbf5e9ce44b5ccc223946eaa9013ee0df8ab9303c376f4",
+    "put_bottles_dustbin": "ca3e2620150854946bf07c8fe5f4d148d77b0d988bc3586683ea3c185de57b23",
+    "put_object_cabinet": "07aae71f44276920851a57d19a5864df468c758ff17ed7256e501bf2107ed6e9",
+    "rotate_qrcode": "81d80f668fbd0af6f79428593bfc2a9d5f59445cfbf91009ff4cf8e5fd5898fa",
+    "scan_object": "3908e3d03f08ceaf800a8754ed39abfe8186d1ef3797be9b0c58fe6010d613bf",
+    "shake_bottle": "dc5b09dc2c1cb932bd60722d4f8295b4d89d3703ae5e4020f17318e3da730e36",
+    "shake_bottle_horizontally": "605c099234ba3a1f471fce6d5339adc8ff816e926cac2ce782579af1f3ab555d",
+    "stack_blocks_three": "d8b3de21979e1a89b1f8b4dbc9d95ea9622e66c1db62c4d6736be996976b0a90",
+    "stack_blocks_two": "49f0a3581142be4934b5e25cd9e315432315a069ba26e65318417ed691389ecd",
+    "stack_bowls_three": "46ecebaaa1828c7f4c941a6761324cf445c7a66e91161d6fbf13c43a214c26ea",
+    "stack_bowls_two": "e3fbb78738e195387a14e80cdfd7270db4743271a951400be2a21e8ecddb9f9a",
+    "stamp_seal": "f23fa7187f4d95f0498a9cd273acead4bcca6ecefc98c602d0ba9b2995520141",
+    "turn_switch": "e3af06581e4a89c0ef438453e6e3b2449aaee3d5f1ee812ac6866ced0e735cc4"
+  },
+  "excluded": {
+    "adjust_bottle": [
+      16
+    ],
+    "beat_block_hammer": [
+      0
+    ],
+    "click_alarmclock": [
+      16
+    ],
+    "click_bell": [
+      45
+    ],
+    "grab_roller": [
+      38
+    ],
+    "handover_block": [
+      12,
+      29
+    ],
+    "hanging_mug": [
+      7,
+      15,
+      25,
+      29
+    ],
+    "move_can_pot": [
+      32,
+      45
+    ],
+    "move_playingcard_away": [
+      9,
+      14,
+      32
+    ],
+    "open_laptop": [
+      3,
+      23,
+      27,
+      44
+    ],
+    "open_microwave": [
+      10,
+      16,
+      17,
+      31,
+      34,
+      42,
+      48
+    ],
+    "pick_diverse_bottles": [
+      48
+    ],
+    "place_a2b_right": [
+      32,
+      37,
+      38
+    ],
+    "place_bread_basket": [
+      5,
+      8,
+      28
+    ],
+    "place_bread_skillet": [
+      30
+    ],
+    "place_can_basket": [
+      5,
+      6,
+      18,
+      20,
+      23,
+      39,
+      41,
+      49
+    ],
+    "place_container_plate": [
+      15,
+      34,
+      38
+    ],
+    "place_dual_shoes": [
+      3,
+      5,
+      9,
+      35
+    ],
+    "place_mouse_pad": [
+      21,
+      45
+    ],
+    "place_object_basket": [
+      14,
+      26,
+      28,
+      41,
+      44
+    ],
+    "place_phone_stand": [
+      4,
+      23
+    ],
+    "place_shoe": [
+      26,
+      45
+    ],
+    "put_bottles_dustbin": [
+      6,
+      28,
+      31
+    ],
+    "put_object_cabinet": [
+      42,
+      43
+    ],
+    "rotate_qrcode": [
+      10,
+      27,
+      30,
+      31
+    ],
+    "scan_object": [
+      46
+    ],
+    "turn_switch": [
+      7,
+      24,
+      42
+    ]
+  },
+  "details": [
+    {
+      "task": "adjust_bottle",
+      "episode": 16,
+      "reasons": [
+        "long",
+        "ik_ratio",
+        "excursion"
+      ],
+      "length": 174,
+      "length_z": 6.520077341607086,
+      "ratio_z": 11.260445072142343,
+      "excursion": 5.416504053881098,
+      "max_step": 0.19999313354492188
+    },
+    {
+      "task": "beat_block_hammer",
+      "episode": 0,
+      "reasons": [
+        "long"
+      ],
+      "length": 126,
+      "length_z": 4.384189936597869,
+      "ratio_z": 3.5186504016945763,
+      "excursion": 0.24127734778799959,
+      "max_step": 0.11285489797592163
+    },
+    {
+      "task": "click_alarmclock",
+      "episode": 16,
+      "reasons": [
+        "long"
+      ],
+      "length": 102,
+      "length_z": 4.271774810018436,
+      "ratio_z": 0.680447433674637,
+      "excursion": 0.13402763221600367,
+      "max_step": 0.2787482738494873
+    },
+    {
+      "task": "click_bell",
+      "episode": 45,
+      "reasons": [
+        "long"
+      ],
+      "length": 87,
+      "length_z": 5.769230769230769,
+      "ratio_z": 0.0,
+      "excursion": 0.10209632569315083,
+      "max_step": 0.10321211814880371
+    },
+    {
+      "task": "grab_roller",
+      "episode": 38,
+      "reasons": [
+        "long",
+        "excursion"
+      ],
+      "length": 131,
+      "length_z": 8.318719366878007,
+      "ratio_z": 0.0,
+      "excursion": 5.915860344440492,
+      "max_step": 0.17001771926879883
+    },
+    {
+      "task": "handover_block",
+      "episode": 12,
+      "reasons": [
+        "excursion"
+      ],
+      "length": 294,
+      "length_z": 2.3607176581680833,
+      "ratio_z": 3.3801071720566256,
+      "excursion": 1.7852317343155544,
+      "max_step": 0.10867631435394287
+    },
+    {
+      "task": "handover_block",
+      "episode": 29,
+      "reasons": [
+        "long"
+      ],
+      "length": 315,
+      "length_z": 5.901794145420208,
+      "ratio_z": 0.07666009411526538,
+      "excursion": 0.5542973906267521,
+      "max_step": 0.12086796760559082
+    },
+    {
+      "task": "hanging_mug",
+      "episode": 7,
+      "reasons": [
+        "long",
+        "excursion"
+      ],
+      "length": 374,
+      "length_z": 5.5720653789004455,
+      "ratio_z": 1.5140502848823534,
+      "excursion": 1.5493300815248847,
+      "max_step": 0.11934185028076172
+    },
+    {
+      "task": "hanging_mug",
+      "episode": 15,
+      "reasons": [
+        "ik_ratio"
+      ],
+      "length": 358,
+      "length_z": 3.1946508172362553,
+      "ratio_z": 6.77254353659875,
+      "excursion": 0.7455060877492576,
+      "max_step": 0.1291637420654297
+    },
+    {
+      "task": "hanging_mug",
+      "episode": 25,
+      "reasons": [
+        "ik_ratio"
+      ],
+      "length": 352,
+      "length_z": 2.303120356612184,
+      "ratio_z": 6.07450999138872,
+      "excursion": 0.7166083456702279,
+      "max_step": 0.11669445037841797
+    },
+    {
+      "task": "hanging_mug",
+      "episode": 29,
+      "reasons": [
+        "ik_ratio"
+      ],
+      "length": 357,
+      "length_z": 3.0460624071322435,
+      "ratio_z": 5.673581372900849,
+      "excursion": 0.7286969663266263,
+      "max_step": 0.12788105010986328
+    },
+    {
+      "task": "move_can_pot",
+      "episode": 32,
+      "reasons": [
+        "excursion"
+      ],
+      "length": 150,
+      "length_z": -0.3372453797382976,
+      "ratio_z": 0.0,
+      "excursion": 2.191075432862086,
+      "max_step": 0.1026456356048584
+    },
+    {
+      "task": "move_can_pot",
+      "episode": 45,
+      "reasons": [
+        "excursion"
+      ],
+      "length": 151,
+      "length_z": -0.1686226898691488,
+      "ratio_z": 0.0,
+      "excursion": 2.453154339166288,
+      "max_step": 0.09969472885131836
+    },
+    {
+      "task": "move_playingcard_away",
+      "episode": 9,
+      "reasons": [
+        "long"
+      ],
+      "length": 129,
+      "length_z": 4.8936170212765955,
+      "ratio_z": 1.709970753921195,
+      "excursion": 0.11650328716402106,
+      "max_step": 0.11553847789764404
+    },
+    {
+      "task": "move_playingcard_away",
+      "episode": 14,
+      "reasons": [
+        "long"
+      ],
+      "length": 129,
+      "length_z": 5.128205128205129,
+      "ratio_z": 1.0907214795048863,
+      "excursion": 0.1653202362700033,
+      "max_step": 0.11463558673858643
+    },
+    {
+      "task": "move_playingcard_away",
+      "episode": 32,
+      "reasons": [
+        "long"
+      ],
+      "length": 132,
+      "length_z": 6.170212765957446,
+      "ratio_z": 0.0,
+      "excursion": 0.19384674727916718,
+      "max_step": 0.11146771907806396
+    },
+    {
+      "task": "open_laptop",
+      "episode": 3,
+      "reasons": [
+        "long"
+      ],
+      "length": 282,
+      "length_z": 7.269511518803304,
+      "ratio_z": 0.0,
+      "excursion": 0.027280353922738865,
+      "max_step": 0.1041111946105957
+    },
+    {
+      "task": "open_laptop",
+      "episode": 23,
+      "reasons": [
+        "long"
+      ],
+      "length": 264,
+      "length_z": 4.271774810018436,
+      "ratio_z": 0.0,
+      "excursion": 0.012991135476611215,
+      "max_step": 0.10915958881378174
+    },
+    {
+      "task": "open_laptop",
+      "episode": 27,
+      "reasons": [
+        "long"
+      ],
+      "length": 315,
+      "length_z": 9.74264430355082,
+      "ratio_z": 0.8994673872552591,
+      "excursion": 0.010720484261463594,
+      "max_step": 0.09106171131134033
+    },
+    {
+      "task": "open_laptop",
+      "episode": 44,
+      "reasons": [
+        "long"
+      ],
+      "length": 355,
+      "length_z": 14.501551328746796,
+      "ratio_z": 0.7998149809605462,
+      "excursion": 0.0,
+      "max_step": 0.11001741886138916
+    },
+    {
+      "task": "open_microwave",
+      "episode": 10,
+      "reasons": [
+        "long"
+      ],
+      "length": 642,
+      "length_z": 11.3314447592068,
+      "ratio_z": 0.0,
+      "excursion": 0.05656431019989664,
+      "max_step": 0.11117231845855713
+    },
+    {
+      "task": "open_microwave",
+      "episode": 16,
+      "reasons": [
+        "long"
+      ],
+      "length": 722,
+      "length_z": 15.648185619857008,
+      "ratio_z": 0.0,
+      "excursion": 0.0,
+      "max_step": 0.11738383769989014
+    },
+    {
+      "task": "open_microwave",
+      "episode": 17,
+      "reasons": [
+        "long"
+      ],
+      "length": 780,
+      "length_z": 18.77782274382841,
+      "ratio_z": 0.0,
+      "excursion": 0.015961251692368398,
+      "max_step": 0.11242520809173584
+    },
+    {
+      "task": "open_microwave",
+      "episode": 31,
+      "reasons": [
+        "long"
+      ],
+      "length": 894,
+      "length_z": 24.92917847025496,
+      "ratio_z": 0.0,
+      "excursion": 0.006198166333636639,
+      "max_step": 0.11485898494720459
+    },
+    {
+      "task": "open_microwave",
+      "episode": 34,
+      "reasons": [
+        "long"
+      ],
+      "length": 829,
+      "length_z": 21.421826520976666,
+      "ratio_z": 0.5173314410186146,
+      "excursion": 0.24746230886815884,
+      "max_step": 0.1121077761054039
+    },
+    {
+      "task": "open_microwave",
+      "episode": 42,
+      "reasons": [
+        "long"
+      ],
+      "length": 731,
+      "length_z": 16.133818966680156,
+      "ratio_z": 0.0,
+      "excursion": 0.053709215577684426,
+      "max_step": 0.11667823791503906
+    },
+    {
+      "task": "open_microwave",
+      "episode": 48,
+      "reasons": [
+        "long"
+      ],
+      "length": 895,
+      "length_z": 24.983137731013088,
+      "ratio_z": 0.0,
+      "excursion": 0.0,
+      "max_step": 0.11597704887390137
+    },
+    {
+      "task": "pick_diverse_bottles",
+      "episode": 48,
+      "reasons": [
+        "excursion"
+      ],
+      "length": 123,
+      "length_z": 0.22483025315886507,
+      "ratio_z": 0.8423560191381091,
+      "excursion": 1.6218465367952983,
+      "max_step": 0.11703121662139893
+    },
+    {
+      "task": "place_a2b_right",
+      "episode": 32,
+      "reasons": [
+        "excursion"
+      ],
+      "length": 150,
+      "length_z": 0.7869058860560277,
+      "ratio_z": 3.421137666811091,
+      "excursion": 2.2899535601821794,
+      "max_step": 0.09186476469039917
+    },
+    {
+      "task": "place_a2b_right",
+      "episode": 37,
+      "reasons": [
+        "excursion"
+      ],
+      "length": 169,
+      "length_z": 3.147623544224111,
+      "ratio_z": 2.629011861097591,
+      "excursion": 1.0363325488823907,
+      "max_step": 0.1175915002822876
+    },
+    {
+      "task": "place_a2b_right",
+      "episode": 38,
+      "reasons": [
+        "excursion"
+      ],
+      "length": 146,
+      "length_z": -0.11241512657943253,
+      "ratio_z": 3.039913748311305,
+      "excursion": 1.2225458740818462,
+      "max_step": 0.08938759565353394
+    },
+    {
+      "task": "place_bread_basket",
+      "episode": 5,
+      "reasons": [
+        "long"
+      ],
+      "length": 314,
+      "length_z": 28.90674683471122,
+      "ratio_z": 0.0,
+      "excursion": 0.3257084710248847,
+      "max_step": 0.10359549522399902
+    },
+    {
+      "task": "place_bread_basket",
+      "episode": 8,
+      "reasons": [
+        "long"
+      ],
+      "length": 315,
+      "length_z": 29.099458480275963,
+      "ratio_z": 0.0,
+      "excursion": 0.0,
+      "max_step": 0.10057270526885986
+    },
+    {
+      "task": "place_bread_basket",
+      "episode": 28,
+      "reasons": [
+        "long"
+      ],
+      "length": 315,
+      "length_z": 29.099458480275963,
+      "ratio_z": 0.0,
+      "excursion": 0.08222031785176179,
+      "max_step": 0.10186707973480225
+    },
+    {
+      "task": "place_bread_skillet",
+      "episode": 30,
+      "reasons": [
+        "long"
+      ],
+      "length": 186,
+      "length_z": 4.496605063177301,
+      "ratio_z": 1.748925064644138,
+      "excursion": 0.26294527813027496,
+      "max_step": 0.293656587600708
+    },
+    {
+      "task": "place_can_basket",
+      "episode": 5,
+      "reasons": [
+        "excursion",
+        "jump"
+      ],
+      "length": 267,
+      "length_z": 2.473132784747516,
+      "ratio_z": 1.9862752094222527,
+      "excursion": 3.9408516095583024,
+      "max_step": 0.3099989891052246
+    },
+    {
+      "task": "place_can_basket",
+      "episode": 6,
+      "reasons": [
+        "excursion",
+        "jump"
+      ],
+      "length": 268,
+      "length_z": 2.623019620186759,
+      "ratio_z": 0.0,
+      "excursion": 3.9451050241056858,
+      "max_step": 0.3058457374572754
+    },
+    {
+      "task": "place_can_basket",
+      "episode": 18,
+      "reasons": [
+        "excursion",
+        "jump"
+      ],
+      "length": 270,
+      "length_z": 2.922793291065246,
+      "ratio_z": 0.06111845972607796,
+      "excursion": 3.9339385420003836,
+      "max_step": 0.3165134787559509
+    },
+    {
+      "task": "place_can_basket",
+      "episode": 20,
+      "reasons": [
+        "jump"
+      ],
+      "length": 269,
+      "length_z": 2.7729064556260026,
+      "ratio_z": 2.652311114350622,
+      "excursion": 0.7087653716308964,
+      "max_step": 0.30901074409484863
+    },
+    {
+      "task": "place_can_basket",
+      "episode": 23,
+      "reasons": [
+        "ik_ratio"
+      ],
+      "length": 258,
+      "length_z": 1.1241512657943253,
+      "ratio_z": 5.15253994478673,
+      "excursion": 0.0,
+      "max_step": 0.10782057046890259
+    },
+    {
+      "task": "place_can_basket",
+      "episode": 39,
+      "reasons": [
+        "excursion",
+        "jump"
+      ],
+      "length": 269,
+      "length_z": 2.7729064556260026,
+      "ratio_z": 2.145752997456272,
+      "excursion": 3.9450962262712994,
+      "max_step": 0.30586397647857666
+    },
+    {
+      "task": "place_can_basket",
+      "episode": 41,
+      "reasons": [
+        "excursion"
+      ],
+      "length": 251,
+      "length_z": 0.0749434177196217,
+      "ratio_z": 1.1012958691334693,
+      "excursion": 1.072601683636001,
+      "max_step": 0.1209179162979126
+    },
+    {
+      "task": "place_can_basket",
+      "episode": 49,
+      "reasons": [
+        "ik_ratio"
+      ],
+      "length": 257,
+      "length_z": 0.974264430355082,
+      "ratio_z": 8.153587778103619,
+      "excursion": 0.03820285617621469,
+      "max_step": 0.11519014835357666
+    },
+    {
+      "task": "place_container_plate",
+      "episode": 15,
+      "reasons": [
+        "long"
+      ],
+      "length": 178,
+      "length_z": 4.496605063177301,
+      "ratio_z": 2.1470192731423756,
+      "excursion": 0.029279011479569506,
+      "max_step": 0.12544548511505127
+    },
+    {
+      "task": "place_container_plate",
+      "episode": 34,
+      "reasons": [
+        "long"
+      ],
+      "length": 181,
+      "length_z": 5.171095822653896,
+      "ratio_z": 3.8112009477248976,
+      "excursion": 0.0483653637046988,
+      "max_step": 0.10476887226104736
+    },
+    {
+      "task": "place_container_plate",
+      "episode": 38,
+      "reasons": [
+        "long"
+      ],
+      "length": 179,
+      "length_z": 4.721435316336167,
+      "ratio_z": 3.9398401290781093,
+      "excursion": 0.2855295119807124,
+      "max_step": 0.11673629283905029
+    },
+    {
+      "task": "place_dual_shoes",
+      "episode": 3,
+      "reasons": [
+        "long",
+        "excursion"
+      ],
+      "length": 269,
+      "length_z": 5.457243417583362,
+      "ratio_z": 0.0,
+      "excursion": 6.739455248137393,
+      "max_step": 0.16416120529174805
+    },
+    {
+      "task": "place_dual_shoes",
+      "episode": 5,
+      "reasons": [
+        "long",
+        "excursion"
+      ],
+      "length": 293,
+      "length_z": 8.40047582257214,
+      "ratio_z": 0.0,
+      "excursion": 6.732030378597318,
+      "max_step": 0.21527457237243652
+    },
+    {
+      "task": "place_dual_shoes",
+      "episode": 9,
+      "reasons": [
+        "long",
+        "excursion"
+      ],
+      "length": 296,
+      "length_z": 8.768379873195737,
+      "ratio_z": 0.0,
+      "excursion": 6.682078833250254,
+      "max_step": 0.21377062797546387
+    },
+    {
+      "task": "place_dual_shoes",
+      "episode": 35,
+      "reasons": [
+        "long",
+        "excursion"
+      ],
+      "length": 293,
+      "length_z": 8.40047582257214,
+      "ratio_z": 0.0,
+      "excursion": 6.681135732328417,
+      "max_step": 0.21292829513549805
+    },
+    {
+      "task": "place_mouse_pad",
+      "episode": 21,
+      "reasons": [
+        "excursion"
+      ],
+      "length": 143,
+      "length_z": -1.011736139214893,
+      "ratio_z": 0.8083930855756986,
+      "excursion": 1.4208127247790496,
+      "max_step": 0.10051369667053223
+    },
+    {
+      "task": "place_mouse_pad",
+      "episode": 45,
+      "reasons": [
+        "long"
+      ],
+      "length": 175,
+      "length_z": 4.384189936597869,
+      "ratio_z": 1.1215077422235118,
+      "excursion": 0.27062340949972474,
+      "max_step": 0.1349228024482727
+    },
+    {
+      "task": "place_object_basket",
+      "episode": 14,
+      "reasons": [
+        "ik_ratio"
+      ],
+      "length": 254,
+      "length_z": 1.3489815189531904,
+      "ratio_z": 5.107599136582864,
+      "excursion": 0.24587267270813976,
+      "max_step": 0.10803994536399841
+    },
+    {
+      "task": "place_object_basket",
+      "episode": 26,
+      "reasons": [
+        "long"
+      ],
+      "length": 270,
+      "length_z": 4.046944556859572,
+      "ratio_z": 0.6732727935833842,
+      "excursion": 0.3530262192133175,
+      "max_step": 0.17341065406799316
+    },
+    {
+      "task": "place_object_basket",
+      "episode": 28,
+      "reasons": [
+        "long",
+        "jump"
+      ],
+      "length": 293,
+      "length_z": 7.925266423849994,
+      "ratio_z": 1.8571062891978667,
+      "excursion": 0.35212765475271124,
+      "max_step": 0.364788293838501
+    },
+    {
+      "task": "place_object_basket",
+      "episode": 41,
+      "reasons": [
+        "ik_ratio"
+      ],
+      "length": 248,
+      "length_z": 0.3372453797382976,
+      "ratio_z": 5.561872846753977,
+      "excursion": 0.24907985662907284,
+      "max_step": 0.11245682835578918
+    },
+    {
+      "task": "place_object_basket",
+      "episode": 44,
+      "reasons": [
+        "excursion"
+      ],
+      "length": 264,
+      "length_z": 3.0352084176446783,
+      "ratio_z": 0.0,
+      "excursion": 4.110996764425058,
+      "max_step": 0.2090257704257965
+    },
+    {
+      "task": "place_phone_stand",
+      "episode": 4,
+      "reasons": [
+        "long"
+      ],
+      "length": 140,
+      "length_z": 4.384189936597869,
+      "ratio_z": 0.0,
+      "excursion": 0.2036969460706432,
+      "max_step": 0.1176985502243042
+    },
+    {
+      "task": "place_phone_stand",
+      "episode": 23,
+      "reasons": [
+        "excursion"
+      ],
+      "length": 134,
+      "length_z": 2.3607176581680833,
+      "ratio_z": 1.9222258579676135,
+      "excursion": 1.6853106801880828,
+      "max_step": 0.10287177562713623
+    },
+    {
+      "task": "place_shoe",
+      "episode": 26,
+      "reasons": [
+        "jump"
+      ],
+      "length": 182,
+      "length_z": 0.1927116455647415,
+      "ratio_z": 2.802462559004097,
+      "excursion": 0.2623658359195372,
+      "max_step": 0.3086569309234619
+    },
+    {
+      "task": "place_shoe",
+      "episode": 45,
+      "reasons": [
+        "long",
+        "excursion",
+        "jump"
+      ],
+      "length": 236,
+      "length_z": 9.442870632672333,
+      "ratio_z": 0.0,
+      "excursion": 7.580965348145616,
+      "max_step": 2.506235122680664
+    },
+    {
+      "task": "put_bottles_dustbin",
+      "episode": 6,
+      "reasons": [
+        "long"
+      ],
+      "length": 783,
+      "length_z": 9.442870632672333,
+      "ratio_z": 0.0,
+      "excursion": 0.08585289589034857,
+      "max_step": 0.11672472953796387
+    },
+    {
+      "task": "put_bottles_dustbin",
+      "episode": 28,
+      "reasons": [
+        "long",
+        "excursion"
+      ],
+      "length": 825,
+      "length_z": 12.590494176896444,
+      "ratio_z": 4.842070027087518,
+      "excursion": 7.902186761299769,
+      "max_step": 0.18282866477966309
+    },
+    {
+      "task": "put_bottles_dustbin",
+      "episode": 31,
+      "reasons": [
+        "excursion"
+      ],
+      "length": 550,
+      "length_z": -8.018945695999522,
+      "ratio_z": 3.010983201409647,
+      "excursion": 7.3365140457948055,
+      "max_step": 0.11524176597595215
+    },
+    {
+      "task": "put_object_cabinet",
+      "episode": 42,
+      "reasons": [
+        "jump"
+      ],
+      "length": 271,
+      "length_z": 0.18518518518518517,
+      "ratio_z": 0.2585270653206417,
+      "excursion": 0.055697638791471604,
+      "max_step": 0.3417787551879883
+    },
+    {
+      "task": "put_object_cabinet",
+      "episode": 43,
+      "reasons": [
+        "jump"
+      ],
+      "length": 265,
+      "length_z": -0.9259259259259258,
+      "ratio_z": 1.0586057300085934,
+      "excursion": 0.0566354151815176,
+      "max_step": 0.40082526206970215
+    },
+    {
+      "task": "rotate_qrcode",
+      "episode": 10,
+      "reasons": [
+        "long",
+        "jump"
+      ],
+      "length": 179,
+      "length_z": 5.395926075812762,
+      "ratio_z": 0.7962322733952205,
+      "excursion": 0.0805313562482279,
+      "max_step": 0.8296215534210205
+    },
+    {
+      "task": "rotate_qrcode",
+      "episode": 27,
+      "reasons": [
+        "jump"
+      ],
+      "length": 170,
+      "length_z": 3.372453797382976,
+      "ratio_z": 0.0,
+      "excursion": 0.060967967935915995,
+      "max_step": 0.8227415084838867
+    },
+    {
+      "task": "rotate_qrcode",
+      "episode": 30,
+      "reasons": [
+        "jump"
+      ],
+      "length": 167,
+      "length_z": 2.697963037906381,
+      "ratio_z": 0.0,
+      "excursion": 0.019555087614640834,
+      "max_step": 0.7239627838134766
+    },
+    {
+      "task": "rotate_qrcode",
+      "episode": 31,
+      "reasons": [
+        "jump"
+      ],
+      "length": 170,
+      "length_z": 3.372453797382976,
+      "ratio_z": 0.0,
+      "excursion": 0.07868732300608448,
+      "max_step": 0.8234715461730957
+    },
+    {
+      "task": "scan_object",
+      "episode": 46,
+      "reasons": [
+        "excursion"
+      ],
+      "length": 189,
+      "length_z": 3.757877088512459,
+      "ratio_z": 0.0,
+      "excursion": 4.564745352571062,
+      "max_step": 0.29607194662094116
+    },
+    {
+      "task": "turn_switch",
+      "episode": 7,
+      "reasons": [
+        "long",
+        "excursion"
+      ],
+      "length": 123,
+      "length_z": 8.768379873195737,
+      "ratio_z": 0.31653694192687093,
+      "excursion": 20.1614897698164,
+      "max_step": 0.15480399131774902
+    },
+    {
+      "task": "turn_switch",
+      "episode": 24,
+      "reasons": [
+        "long",
+        "excursion"
+      ],
+      "length": 123,
+      "length_z": 7.149602050451909,
+      "ratio_z": 0.02454188293490819,
+      "excursion": 20.807211084912222,
+      "max_step": 0.1665184497833252
+    },
+    {
+      "task": "turn_switch",
+      "episode": 42,
+      "reasons": [
+        "long",
+        "excursion"
+      ],
+      "length": 114,
+      "length_z": 5.73317145555106,
+      "ratio_z": 0.0,
+      "excursion": 5.303440482374131,
+      "max_step": 0.16934967041015625
+    }
+  ]
+}
