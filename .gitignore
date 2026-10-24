@@ -13,6 +13,7 @@ models/
 runs/
 artifacts/
 tmp/
+result/
 __pycache__/
 *.pyc
 *.egg-info/
