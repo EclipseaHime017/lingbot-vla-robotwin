@@ -513,3 +513,29 @@ python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=4 \
 [configs/train_expert_full_filter.yaml](configs/train_expert_full_filter.yaml) 从 5 个 epoch 的导出热启动，尽量少改动：去掉上述示范并使用其余全部示范，seen 指令在同一轨迹内重抽，学习率峰值 `1e-5`、预热 100 步，训练 6,000 步；与 5 个 epoch 的运行一样不使用图像或状态增强。原有入口、配置和数据文件不变。
 
 [configs/train_expert_full_filter_lr3e5.yaml](configs/train_expert_full_filter_lr3e5.yaml) 是更强的变体：起点、数据和指令处理相同，更新量与第一轮相同（学习率峰值 `3e-5`、预热 300 步、12,000 步）。它与第一轮的差别只在去掉了图像和状态增强（以及剔除的示范），两者对比可以区分增强与更新量各自的影响。
+
+### 3.10 提交模型的复现与评测
+
+提交的 checkpoint 为两阶段训练的结果，全程只用 clean 数据、只训练 Action Expert（VLM 冻结），单份权重用于全部任务：
+
+1. [configs/train_expert_full_5epochs.yaml](configs/train_expert_full_5epochs.yaml)：从基模训练全部 Action Expert，每任务第 0–44 条示范训练，38,620 次更新（全局 batch 64，5 个 epoch），学习率峰值 `5e-5`。
+2. [configs/train_expert_full_filter.yaml](configs/train_expert_full_filter.yaml)：以第一阶段导出热启动，按 3.9 节剔除 74 条异常示范后使用其余全部示范，6,000 次更新，学习率峰值 `1e-5`。
+
+第一阶段的输出目录就是第二阶段的 `init_from`。单机 4 卡一键复现（数据下载、转换、两阶段训练与筛选结果核对）：
+
+```bash
+bash scripts/reproduce_submission.sh            # 结果：runs/expert-filter/checkpoints/global_step_6000/hf_ckpt
+```
+
+评测使用 `eval.sh` 与 [configs/eval.yaml](configs/eval.yaml)（原生 FP32 推理，执行 50 步，去噪 10 步，关闭 compile 与平滑）：
+
+```bash
+bash eval.sh --checkpoint runs/expert-filter/checkpoints/global_step_6000/hf_ckpt \
+  --config configs/eval.yaml --tasks all --setting demo_clean --trials 100 --output runs/evaluation/submission-clean
+bash eval.sh --checkpoint runs/expert-filter/checkpoints/global_step_6000/hf_ckpt \
+  --config configs/eval.yaml --tasks all --setting demo_randomized --trials 100 --output runs/evaluation/submission-randomized
+```
+
+FP32 推理服务约需 25 GB 显存，加一路仿真峰值约 34 GB，需要支持 Vulkan 渲染的 NVIDIA GPU。
+
+模型服务与仿真分处两台机器时，可用 [scripts/evaluate_remote.py](scripts/evaluate_remote.py)：`serve` 在推理机上按 GPU 启动原生推理服务并写出包含端口和权重哈希的清单，`evaluate` 在仿真机上通过可达端口（例如 SSH 端口转发）运行 50 × 2 × 10 快速评测，输出格式与 3.8 节相同。端口转发方式与集群相关，不在本仓库中。

@@ -95,3 +95,24 @@ def test_evaluation_cannot_be_packaged_with_unrelated_counts(tmp_path):
     results.write_text(json.dumps(changed))
     with pytest.raises(ValueError, match="counts differ"):
         module.validate_evaluation_binding(results, checkpoint)
+
+
+def test_weights_can_ship_outside_the_archive_with_checksums(tmp_path):
+    run = tmp_path / "run"
+    selected = run / "checkpoints/global_step_6000/hf_ckpt"
+    other = run / "checkpoints/global_step_5000/hf_ckpt"
+    for directory in (selected, other):
+        directory.mkdir(parents=True)
+        (directory / "model-00001.safetensors").write_bytes(b"weights")
+        (directory / "model.safetensors.index.json").write_text("{}")
+    (run / "lingbotvla_cli.yaml").write_text("{}")
+    (run / "notes.md").write_text("not packaged")
+    full = {path.relative_to(run).as_posix() for path in module.run_members(run, selected)}
+    assert full == {"lingbotvla_cli.yaml", "checkpoints/global_step_6000/hf_ckpt/model-00001.safetensors",
+                    "checkpoints/global_step_6000/hf_ckpt/model.safetensors.index.json"}
+    light = {path.relative_to(run).as_posix() for path in module.run_members(run, selected, include_weights=False)}
+    assert light == full - {"checkpoints/global_step_6000/hf_ckpt/model-00001.safetensors"}
+    identity = module.base_checkpoint_identity(selected)
+    note = module.checkpoint_note("https://example.org/model", run, selected, identity)
+    assert "https://example.org/model" in note and identity["sha256"] in note and identity["shards"][0]["sha256"] in note
+    assert "03_模型材料/run/checkpoints/global_step_6000/hf_ckpt/" in note

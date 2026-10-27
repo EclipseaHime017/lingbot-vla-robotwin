@@ -88,6 +88,32 @@ def validate_evaluation_binding(results_path: Path, checkpoint: Path) -> dict:
     return plan
 
 
+def run_members(run: Path, checkpoint: Path, include_weights: bool = True):
+    """Files of the trained run to package: the selected export plus metadata/configs."""
+    for path in sorted(run.rglob("*")):
+        relative = path.relative_to(run)
+        if relative.parts[0] == "checkpoints" and not path.is_relative_to(checkpoint):
+            continue
+        if not include_weights and path.suffix == ".safetensors":
+            continue
+        if path.is_file() and path.suffix in {".safetensors", ".json", ".yaml", ".yml", ".txt"}:
+            yield path
+
+
+def checkpoint_note(url: str, run: Path, checkpoint: Path, identity: dict) -> str:
+    """Download instructions with per-shard checksums for weights shipped outside the archive."""
+    relative = checkpoint.relative_to(run).as_posix()
+    total = sum(shard["size"] for shard in identity["shards"])
+    lines = ["# Checkpoint download", "",
+             f"The weight shards are not inside this archive (size limit). Download them from {url}",
+             f"and place the `*.safetensors` files in `03_模型材料/run/{relative}/`, next to `model.safetensors.index.json`.", "",
+             f"- Shards: {len(identity['shards'])}, total {total} bytes ({total / 2**30:.2f} GiB)",
+             f"- Weight identity sha256: `{identity['sha256']}` (sha256 of the shard inventory below)", "",
+             "| File | Bytes | sha256 |", "|---|---:|---|"]
+    lines += [f"| {shard['file']} | {shard['size']} | `{shard['sha256']}` |" for shard in identity["shards"]]
+    return "\n".join(lines) + "\n"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results", type=Path, required=True, help="Measured results matching the supplied official JSON")
@@ -96,6 +122,7 @@ def main():
     parser.add_argument("--report", type=Path, required=True, help="Completed reproduction report using the supplied template")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--no-vendor", action="store_true", help="Reclone pinned upstream sources using setup scripts")
+    parser.add_argument("--weights-url", help="Leave the weight shards out and point to this download location instead")
     args = parser.parse_args()
     validate_results(json.loads(args.results.read_text()))
     run = args.run.resolve()
@@ -108,7 +135,7 @@ def main():
     checkpoint = args.checkpoint.resolve() if args.checkpoint else (checkpoints[0] if len(checkpoints) == 1 else None)
     if checkpoint not in checkpoints:
         parser.error("Select exactly one merged export using --checkpoint, including hf_ckpt_float32 if desired")
-    validate_evaluation_binding(args.results, checkpoint)
+    plan = validate_evaluation_binding(args.results, checkpoint)
     if not args.report.is_file() or not args.report.read_text().strip():
         parser.error("--report must be a completed reproduction report")
     if args.output.exists():
@@ -136,11 +163,11 @@ def main():
                             archive.write(path, "02_代码材料/" + path.relative_to(ROOT).as_posix())
                     archive.writestr("02_代码材料/vendor/" + repo + "/.lrvla_snapshot.json",
                                      json.dumps(snapshot, indent=2))
-            for path in sorted(run.rglob("*")):
-                if path.relative_to(run).parts[0] == "checkpoints" and not path.is_relative_to(checkpoint):
-                    continue
-                if path.is_file() and path.suffix in {".safetensors", ".json", ".yaml", ".yml", ".txt"}:
-                    archive.write(path, "03_模型材料/run/" + path.relative_to(run).as_posix())
+            for path in run_members(run, checkpoint, include_weights=not args.weights_url):
+                archive.write(path, "03_模型材料/run/" + path.relative_to(run).as_posix())
+            if args.weights_url:
+                archive.writestr("03_模型材料/CHECKPOINT_DOWNLOAD.md",
+                                 checkpoint_note(args.weights_url, run, checkpoint, plan["checkpoint_identity"]))
         temporary.replace(args.output)
     except BaseException:
         temporary.unlink(missing_ok=True)
